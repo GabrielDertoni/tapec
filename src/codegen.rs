@@ -11,6 +11,7 @@ macro_rules! error {
 }
 
 const TAPE_SIZE: usize = 256;
+const EMPTY_DEFAULT: i32 = -1;
 
 fn as_prim_op<'a>(inst: &ast::Inst<'a>) -> Vec<ast::Stmt<'a>> {
     match inst.op {
@@ -211,7 +212,17 @@ pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
                 }
             },
             ast::Stmt::Inst(inst) => {
-                off += 1 + inst.args.len();
+                off += 1;
+                for arg in &inst.args {
+                    if let ast::Arg::Lbl(lbl) = arg {
+                        if let Some((_, ref mut block)) = curr_ctxt {
+                            block.labels.insert(lbl.as_ref(), off);
+                        } else {
+                            return error!("No parent label", lbl.span.clone());
+                        }
+                    }
+                    off += 1;
+                }
             },
             ast::Stmt::Lit(lit) => {
                 off += lit_size(lit);
@@ -234,8 +245,15 @@ pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
                 tape.write(inst.op as i32);
 
                 for arg in &inst.args {
-                    let val = expand_lit(arg, off, &curr_ctxt, &blocks, &mut tape)?;
-                    tape.write(*val);
+                    match arg {
+                        ast::Arg::Lit(lit) => {
+                            let val = expand_lit(lit, off, &curr_ctxt, &blocks, &mut tape)?;
+                            tape.write(*val);
+                        },
+                        ast::Arg::Lbl(_) => {
+                            tape.write(EMPTY_DEFAULT);
+                        },
+                    }
                 }
             },
             ast::Stmt::Label(lbl) if !lbl.starts_with('.') => {
