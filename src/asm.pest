@@ -1,0 +1,25 @@
+
+asm = { SOI ~ stmt* ~ EOI }
+
+stmt = { label | inst }
+
+label = ${ "."? ~ ident ~ ":" }
+
+inst = ${ ident ~ (WHITESPACE ~ arg)* ~ eol}
+
+arg = ${ lit_arg | str_arg | chr_arg | lbl_arg | num_arg }
+	lbl_arg = @{ ident }
+    num_arg = @{ number }
+    chr_arg = @{ "'" ~ "\\"? ~ ANY ~ "'"}
+    str_arg = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+    lit_arg = ${ "&" ~ arg }
+
+ident = @{ ident_letter ~ (ident_letter | ASCII_DIGIT)* }
+
+number = @{ ASCII_DIGIT+ }
+
+ident_letter = _{ ASCII_ALPHA | "_" }
+eol = _{ (" " | "\t")* ~ (COMMENT | NEWLINE | EOI) }
+
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+COMMENT = _{ ";" ~ !NEWLINE ~ ANY* }
