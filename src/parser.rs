@@ -1,5 +1,6 @@
 use pest_derive::Parser;
 use pest::Parser;
+use pest::Span;
 use pest::iterators::Pair;
 
 use crate::ast::*;
@@ -25,8 +26,28 @@ fn parse_label(pair: Pair<Rule>) -> Result<Spanned<&str>, Error> {
     Ok(Spanned::new(ident.as_str(), ident.as_span()))
 }
 
-fn extract_str(s: &str) -> &str {
-    &s[1..s.len()-1]
+fn extract_str(s: &str, span: Span) -> Result<String, Error> {
+    let mut new = String::new();
+    let inner = &s[1..s.len()-1];
+    let mut chars = inner.chars();
+
+    while let Some(c) = chars.next() {
+        let mut translated = c;
+
+        if c == '\\' {
+             translated = match chars.next().unwrap() {
+                'n'  => '\n',
+                'r'  => '\r',
+                't'  => '\t',
+                '\\' => '\\',
+                '"'  => '"',
+                any  => return error!(format!("not a valid escape '{}'", any), span),
+            };
+        }
+
+        new.push(translated);
+    }
+    Ok(new)
 }
 
 fn extract_chr(s: &str) -> char {
@@ -40,23 +61,32 @@ fn extract_chr(s: &str) -> char {
     }
 }
 
-fn parse_arg(pair: Pair<Rule>) -> Result<Arg, Error> {
-    let arg = pair
+fn parse_lbl(pair: Pair<Rule>) -> Result<Spanned<&str>, Error> {
+    let ident = pair
         .into_inner()
         .next()
         .unwrap();
 
-    let span = arg.as_span();
-    let parsed = match arg.as_rule() {
-        Rule::lbl_arg => Arg::Lbl(Spanned::new(arg.as_str(), span)),
-        Rule::num_arg => match arg.as_str().parse() {
-            Ok(n)  => Arg::Num(Spanned::new(n, span)),
-            Err(e) => return error!(e.to_string(), span),
-        },
-        Rule::str_arg => Arg::Str(Spanned::new(extract_str(arg.as_str()), span)),
-        Rule::chr_arg => Arg::Chr(Spanned::new(extract_chr(arg.as_str()), span)),
-        Rule::lit_arg => Arg::Lit(Box::new(parse_arg(arg.into_inner().next().unwrap())?)),
-        _             => return error!("unexpected arg type", span),
+    Ok(Spanned::new(ident.as_str(), ident.as_span()))
+}
+
+fn parse_lit(pair: Pair<Rule>) -> Result<Lit, Error> {
+    let lit = pair
+        .into_inner()
+        .next()
+        .unwrap();
+
+    let span = lit.as_span();
+    let parsed = match lit.as_rule() {
+        Rule::lbl     => Lit::Lbl(parse_lbl(lit)?),
+        Rule::num     => match lit.as_str().parse() {
+                            Ok(n)  => Lit::Num(Spanned::new(n, span)),
+                            Err(e) => return error!(e.to_string(), span),
+                         },
+        Rule::str     => Lit::Str(Spanned::new(extract_str(lit.as_str(), span.clone())?, span)),
+        Rule::chr     => Lit::Chr(Spanned::new(extract_chr(lit.as_str()), span)),
+        Rule::lit_ref => Lit::Ref(Box::new(parse_lit(lit.into_inner().next().unwrap())?)),
+        _             => unreachable!(),
     };
 
     Ok(parsed)
@@ -83,7 +113,7 @@ fn parse_inst(pair: Pair<Rule>) -> Result<Inst, Error> {
     let arg_lst: Vec<_> = inst_iter.collect();
 
     if arg_lst.len() == op.nargs() {
-        let args: Result<Vec<_>, _> = arg_lst.into_iter().map(parse_arg).collect();
+        let args: Result<Vec<_>, _> = arg_lst.into_iter().map(parse_lit).collect();
         let args = args?;
         Ok(Inst { op, args, span })
     } else {
@@ -97,12 +127,11 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt, Error> {
         .next()
         .unwrap();
 
-    if stmt.as_rule() == Rule::label {
-        Ok(Stmt::Label(parse_label(stmt)?))
-    } else if stmt.as_rule() == Rule::inst {
-        Ok(Stmt::Inst(parse_inst(stmt)?))
-    } else {
-        unreachable!()
+    match stmt.as_rule() {
+        Rule::label => Ok(Stmt::Label(parse_label(stmt)?)),
+        Rule::inst  => Ok(Stmt::Inst(parse_inst(stmt)?)),
+        Rule::lit   => Ok(Stmt::Lit(parse_lit(stmt)?)),
+        _           => unreachable!(),
     }
 }
 

@@ -1,19 +1,23 @@
 
 asm = { SOI ~ stmt* ~ EOI }
 
-stmt = { label | inst }
+stmt = { label | inst | lit }
 
 label = ${ "."? ~ ident ~ ":" }
 
 inst = ${ ident ~ (space ~ arg)* ~ eol}
     space = _{ " " | "\t" }
 
-arg = ${ lit_arg | str_arg | chr_arg | lbl_arg | num_arg }
-	lbl_arg = @{ ident }
-    num_arg = @{ number }
-    chr_arg = @{ "'" ~ "\\"? ~ ANY ~ "'"}
-    str_arg = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
-    lit_arg = ${ "&" ~ arg }
+arg = ${ lit_ref | chr | lbl | num | arg_lbl }
+    arg_lbl = ${ "<" ~ ident ~ ">"}
+
+lit = ${ lit_ref | str | chr | lbl | num }
+    lit_ref = ${ "&" ~ lit }
+
+lbl = ${ "'" ~ ident }
+num = @{ number }
+chr = @{ "'" ~ "\\"? ~ ANY ~ "'"}
+str = @{ "\"" ~ (("\\" ~ ANY) | (!"\"" ~ ANY))* ~ "\"" }
 
 ident = @{ ident_letter ~ (ident_letter | ASCII_DIGIT)* }
 
@@ -23,4 +27,4 @@ ident_letter = _{ ASCII_ALPHA | "_" }
 eol = _{ (" " | "\t")* ~ (COMMENT | NEWLINE | EOI) }
 
 WHITESPACE = _{ " " | "\t" | NEWLINE }
-COMMENT = _{ ";" ~ !NEWLINE ~ ANY* }
+COMMENT = _{ ";" ~ (!NEWLINE ~ ANY)* }

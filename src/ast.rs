@@ -38,6 +38,7 @@ pub struct Prog<'a> {
 pub enum Stmt<'a> {
     Label(Label<'a>),
     Inst(Inst<'a>),
+    Lit(Lit<'a>),
 }
 
 pub type Label<'a> = Spanned<'a, &'a str>;
@@ -45,17 +46,17 @@ pub type Label<'a> = Spanned<'a, &'a str>;
 #[derive(Debug, Clone)]
 pub struct Inst<'a> {
     pub op: Op,
-    pub args: Vec<Arg<'a>>,
+    pub args: Vec<Lit<'a>>,
     pub span: Span<'a>,
 }
 
 #[derive(Debug, Clone)]
-pub enum Arg<'a> {
+pub enum Lit<'a> {
     Lbl(Spanned<'a, &'a str>),
     Num(Spanned<'a, i32>),
-    Str(Spanned<'a, &'a str>),
+    Str(Spanned<'a, String>),
     Chr(Spanned<'a, char>),
-    Lit(Box<Arg<'a>>),
+    Ref(Box<Lit<'a>>),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -77,4 +78,10 @@ impl<'a, T> std::ops::Deref for Spanned<'a, T> {
 
 impl<'a, T> std::ops::DerefMut for Spanned<'a, T> {
     fn deref_mut(&mut self) -> &mut T { &mut self.inner }
+}
+
+impl<'a, T> std::convert::AsRef<T> for Spanned<'a, T> {
+    fn as_ref(&self) -> &T {
+        &self.inner
+    }
 }
