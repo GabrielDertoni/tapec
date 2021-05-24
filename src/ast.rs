@@ -29,13 +29,18 @@ impl Op {
     }
 }
 
-pub type Label<'a> = Spanned<'a, &'a str>;
+pub struct Prog<'a> {
+    pub stmts: Vec<Stmt<'a>>,
+    pub span: Span<'a>,
+}
 
 #[derive(Debug, Clone)]
 pub enum Stmt<'a> {
     Label(Label<'a>),
     Inst(Inst<'a>),
 }
+
+pub type Label<'a> = Spanned<'a, &'a str>;
 
 #[derive(Debug, Clone)]
 pub struct Inst<'a> {

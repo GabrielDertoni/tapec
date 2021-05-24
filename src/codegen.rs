@@ -9,37 +9,7 @@ macro_rules! error {
     };
 }
 
-
-/*
-fn assemble_bound_labels<'a>(stmts: &Vec<ast::Stmt<'a>>) -> Vec<ast::Stmt<'a>> {
-    let mut tape = Vec::new();
-    let mut labels = HashMap::new();
-
-    let lbls = stmts
-        .iter()
-        .enumerate()
-        .filter_map(|stmt|
-            if let Stmt::Label(lbl) = stmt {
-                Some(lbl)
-            } else {
-                None
-            }
-        );
-
-    for lbl in lbl_stmts
-    {
-        match stmt {
-            ast::Stmt::Inst(inst) => {
-                
-            },
-            ast::Stmt::Label(lbl) => {
-                labels.insert(lbl, tape.len());
-            },
-        }
-    }
-    tape
-}
-*/
+const TAPE_SIZE: usize = 256;
 
 fn as_prim_op<'a>(inst: &ast::Inst<'a>) -> Result<Vec<ast::Inst<'a>>, Error> {
     match inst.op {
@@ -72,8 +42,8 @@ fn arg_value(
     curr_ctxt: &Option<(&ast::Label, &Block)>,
     blocks: &HashMap<ast::Label, Block>,
     values: &mut Vec<i32>
-) -> Result<i32, Error>
-{
+) -> Result<i32, Error> {
+
     match arg {
         ast::Arg::Num(n)   => Ok(**n),
         ast::Arg::Lbl(lbl) => {
@@ -103,7 +73,7 @@ fn arg_value(
     }
 }
 
-pub fn gen_code(stmts: Vec<ast::Stmt>) -> Result<Vec<i32>, Error> {
+pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
 
     let mut tape = Vec::new();
     // let mut desugared = Vec::new();
@@ -113,7 +83,7 @@ pub fn gen_code(stmts: Vec<ast::Stmt>) -> Result<Vec<i32>, Error> {
 
     let mut off = 0;
     // Solve labels and desugar.
-    for stmt in &stmts {
+    for stmt in &prog.stmts {
         match stmt {
             ast::Stmt::Label(lbl) if !lbl.starts_with(".") => {
                 if let Some((name, block)) = curr_ctxt.take() {
@@ -145,8 +115,9 @@ pub fn gen_code(stmts: Vec<ast::Stmt>) -> Result<Vec<i32>, Error> {
     }
 
     let mut curr_ctxt: Option<(&ast::Label, &Block)> = None;
+
     // Build tape
-    for stmt in &stmts {
+    for stmt in &prog.stmts {
         match stmt {
             ast::Stmt::Inst(inst) => {
                 tape.push(inst.op as i32);
@@ -164,5 +135,12 @@ pub fn gen_code(stmts: Vec<ast::Stmt>) -> Result<Vec<i32>, Error> {
     }
 
     tape.extend(values);
+
+    let len = tape.len();
+    if len >= TAPE_SIZE {
+        return error!("tape size exceeded", prog.span.clone());
+    }
+
+    tape.extend(std::iter::repeat(0).take(TAPE_SIZE - len));
     Ok(tape)
 }

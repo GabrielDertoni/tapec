@@ -5,7 +5,8 @@ stmt = { label | inst }
 
 label = ${ "."? ~ ident ~ ":" }
 
-inst = ${ ident ~ (WHITESPACE ~ arg)* ~ eol}
+inst = ${ ident ~ (space ~ arg)* ~ eol}
+    space = _{ " " | "\t" }
 
 arg = ${ lit_arg | str_arg | chr_arg | lbl_arg | num_arg }
 	lbl_arg = @{ ident }

@@ -1,3 +1,4 @@
+use pest_derive::Parser;
 use pest::Parser;
 use pest::iterators::Pair;
 
@@ -86,7 +87,7 @@ fn parse_inst(pair: Pair<Rule>) -> Result<Inst, Error> {
         let args = args?;
         Ok(Inst { op, args, span })
     } else {
-        error!(format!("expected {} arguments but got {}", op.nargs(), arg_lst.len()), span)
+        error!(format!("expected {} argument(s) but got {}", op.nargs(), arg_lst.len()), span)
     }
 }
 
@@ -105,7 +106,17 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt, Error> {
     }
 }
 
-pub fn parse_asm(program: &str) -> Result<Vec<Stmt>, Error> {
-    let stmts = ASMParser::parse(Rule::asm, program)?.next().unwrap();
-    stmts.into_inner().filter(|stmt| stmt.as_rule() == Rule::stmt).map(parse_stmt).collect()
+pub fn parse_asm(program: &str) -> Result<Prog, Error> {
+    let prog = ASMParser::parse(Rule::asm, program)?.next().unwrap();
+    let span = prog.as_span();
+    let res: Result<Vec<_>, _> = prog
+        .into_inner()
+        .filter(|stmt| stmt.as_rule() == Rule::stmt)
+        .map(parse_stmt)
+        .collect();
+
+    Ok(Prog {
+        stmts: res?,
+        span,
+    })
 }
