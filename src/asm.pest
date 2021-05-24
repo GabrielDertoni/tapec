@@ -3,18 +3,20 @@ asm = { SOI ~ stmt* ~ EOI }
 
 stmt = { label | inst | lit }
 
-label = ${ "."? ~ ident ~ ":" }
+label = ${ lbl_name ~ ":" }
 
 inst = ${ ident ~ (space ~ arg)* ~ eol}
     space = _{ " " | "\t" }
 
-arg = ${ lit_ref | chr | lbl | num | arg_lbl }
-    arg_lbl = ${ "<" ~ ident ~ ">"}
+arg = ${ lit | arg_lbl }
+    arg_lbl = ${ "<" ~ lbl_name ~ ">"}
 
 lit = ${ lit_ref | str | chr | lbl | num }
     lit_ref = ${ "&" ~ lit }
 
-lbl = ${ "'" ~ ident }
+lbl = ${ "'" ~ lbl_name }
+lbl_name = @{ "."? ~ ident }
+
 num = @{ number }
 chr = @{ "'" ~ "\\"? ~ ANY ~ "'"}
 str = @{ "\"" ~ (("\\" ~ ANY) | (!"\"" ~ ANY))* ~ "\"" }

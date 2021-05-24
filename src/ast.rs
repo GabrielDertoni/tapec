@@ -46,7 +46,7 @@ pub type Label<'a> = Spanned<'a, &'a str>;
 #[derive(Debug, Clone)]
 pub struct Inst<'a> {
     pub op: Op,
-    pub args: Vec<Lit<'a>>,
+    pub args: Vec<Arg<'a>>,
     pub span: Span<'a>,
 }
 
@@ -57,6 +57,12 @@ pub enum Lit<'a> {
     Str(Spanned<'a, String>),
     Chr(Spanned<'a, char>),
     Ref(Box<Lit<'a>>),
+}
+
+#[derive(Debug, Clone)]
+pub enum Arg<'a> {
+    Lit(Lit<'a>),
+    Lbl(Label<'a>),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]

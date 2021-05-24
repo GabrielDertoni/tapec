@@ -41,6 +41,7 @@ fn extract_str(s: &str, span: Span) -> Result<String, Error> {
                 't'  => '\t',
                 '\\' => '\\',
                 '"'  => '"',
+                '0'  => '\0',
                 any  => return error!(format!("not a valid escape '{}'", any), span),
             };
         }
@@ -92,6 +93,34 @@ fn parse_lit(pair: Pair<Rule>) -> Result<Lit, Error> {
     Ok(parsed)
 }
 
+fn extract_arg_lbl<'a>(s: &'a str, span: Span<'a>) -> Result<Label<'a>, Error> {
+    let len = s.len();
+    let inner = &s[1..len-1];
+    if inner.chars().nth(0).unwrap() == '.' {
+        Ok(Spanned::new(inner, span))
+    } else {
+        error!("only local labels can be argument labels", span)
+    }
+}
+
+fn parse_arg(pair: Pair<Rule>) -> Result<Arg, Error> {
+    let arg = pair
+        .into_inner()
+        .next()
+        .unwrap();
+
+    let span = arg.as_span();
+    let parsed = match arg.as_rule() {
+        Rule::lit     => Arg::Lit(parse_lit(arg)?),
+        Rule::arg_lbl => {
+            let lbl = extract_arg_lbl(arg.as_str(), span.clone())?;
+            Arg::Lbl(lbl)
+        },
+        _             => unreachable!(),
+    };
+    Ok(parsed)
+}
+
 fn parse_inst(pair: Pair<Rule>) -> Result<Inst, Error> {
     let mut inst_iter = pair.into_inner();
     let ident = inst_iter.next().unwrap();
@@ -106,14 +135,14 @@ fn parse_inst(pair: Pair<Rule>) -> Result<Inst, Error> {
         "beq" => Op::Beq,
         "cpy" => Op::Cpy,
         "put" => Op::Put,
-        _ => return error!("not a valid instruction", ident.as_span()),
+        _     => return error!("not a valid instruction", ident.as_span()),
     };
 
     let span = ident.as_span();
     let arg_lst: Vec<_> = inst_iter.collect();
 
     if arg_lst.len() == op.nargs() {
-        let args: Result<Vec<_>, _> = arg_lst.into_iter().map(parse_lit).collect();
+        let args: Result<Vec<_>, _> = arg_lst.into_iter().map(parse_arg).collect();
         let args = args?;
         Ok(Inst { op, args, span })
     } else {
