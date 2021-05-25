@@ -1,4 +1,3 @@
-
 main:
     put &'h'
     put &'e'
