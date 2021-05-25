@@ -11,8 +11,10 @@ inst = ${ ident ~ (space ~ arg)* ~ eol}
 arg = ${ lit | arg_lbl }
     arg_lbl = ${ "<" ~ lbl_name ~ ">"}
 
-lit = ${ lit_ref | str | chr | lbl | num }
+lit = ${ lit_ref | lit_deref | str | chr | lbl | num }
     lit_ref = ${ "&" ~ lit }
+    lit_deref = ${ "*" ~ (lit_deref | derefable) }
+    derefable = ${ lbl | lit_ref }
 
 lbl = ${ "'" ~ lbl_name }
 lbl_name = @{ "."? ~ ident }

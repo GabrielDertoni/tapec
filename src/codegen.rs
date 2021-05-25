@@ -1,3 +1,5 @@
+#![allow(unused_macros)]
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -10,21 +12,214 @@ macro_rules! error {
     };
 }
 
+// Evaluates to Some(expr) if the pattern matches. Else evaluates to None.
+/*
+macro_rules! mextract {
+    ($to_match:expr, $pat:pat => $expr:expr) => {
+        match $to_match {
+            $pat => Some($expr),
+            _    => None,
+        }
+    };
+}
+*/
+
+macro_rules! inst_args {
+    ($span:expr => (@lit $lit:expr)) => {
+        ast::Arg::Lit($lit)
+    };
+
+    ($span:expr => (@lbl $lbl:expr)) => {
+        ast::Arg::Lbl($lbl)
+    };
+
+    ($span:expr => $lit:expr) => {
+        $lit
+    };
+
+    ($span:expr =>) => { };
+}
+
+macro_rules! inst {
+    ($span:expr => $inst:ident, $($tail:tt),*) => {
+        ast::Inst::new(ast::Op::$inst, vec![$(inst_args!($span => $tail)),*], $span)
+    };
+}
+
+macro_rules! stmt {
+    ($span:expr => label $name:expr) => {
+        ast::Stmt::Label(ast::mk_lbl(name, $span.clone()))
+    };
+
+    ($span:expr => $($toks:tt)*) => {
+        ast::Stmt::Inst(inst!($span => $($toks)*))
+    };
+}
+
+macro_rules! stmts {
+    ($span:expr => $([$($toks:tt)*])+) => {
+        vec![$(stmt!($span => $($toks)*)),+]
+    };
+}
+
 const TAPE_SIZE: usize = 256;
 const EMPTY_DEFAULT: i32 = -1;
 
-fn as_prim_op<'a>(inst: &ast::Inst<'a>) -> Vec<ast::Stmt<'a>> {
-    match inst.op {
-        ast::Op::Hlt |
-        ast::Op::Add |
-        ast::Op::Mul |
-        ast::Op::Cle |
-        ast::Op::Ceq |
-        ast::Op::Jmp |
-        ast::Op::Beq |
-        ast::Op::Cpy |
-        ast::Op::Put => vec![ast::Stmt::Inst(inst.clone())],
+struct Desugarer<'a> {
+    stmts: &'a [ast::Stmt<'a>],
+    sugar_queue: VecDeque<ast::Stmt<'a>>,
+    head_pos: usize,
+}
+
+impl<'a> Desugarer<'a> {
+    fn new(prog: &'a ast::Prog<'a>) -> Desugarer<'a> {
+        Desugarer {
+            stmts: &prog.stmts,
+            sugar_queue: VecDeque::new(),
+            head_pos: 0,
+        }
     }
+
+    fn desugar(&mut self, stmt: &ast::Stmt<'a>) {
+        match stmt {
+            ast::Stmt::Inst(inst) => desugar_inst(inst, self),
+            ast::Stmt::Lit(_)  |
+            ast::Stmt::Label(_) =>
+                self.sugar_queue.push_back(stmt.clone()),
+        }
+    }
+
+    fn push_sugar(&mut self, stmt: ast::Stmt<'a>) {
+        self.sugar_queue.push_back(stmt);
+    }
+
+    fn get_head_pos(&self) -> usize { self.head_pos }
+}
+
+fn solve_arg_deref<'a>(
+    deref_to: ast::Lit<'a>,
+    lbl: ast::Label<'a>,
+    pos: usize,
+    depth: usize,
+    stmts: &mut Vec<ast::Stmt<'a>>
+) {
+    match deref_to {
+        ast::Lit::Deref(box deref) => {
+            let cpy_lbl = ast::mk_lbl(format!(":__cpy_{}_{}", pos, depth + 1), deref.span());
+            solve_arg_deref(deref.clone(), cpy_lbl.clone(), pos, depth + 1, stmts);
+            let lbl_lit = ast::Lit::Lbl(lbl);
+
+            let stmt = stmt!(deref.span() => Cpy, (@lbl cpy_lbl), (@lit lbl_lit));
+            stmts.push(stmt);
+        },
+        other => {
+            let lbl_lit = ast::Lit::Lbl(lbl);
+            let span = other.span();
+            stmts.push(stmt!(span => Cpy, (@lit other), (@lit lbl_lit)));
+        },
+    }
+}
+
+fn desugar_arg_deref<'a>(
+    inst: &ast::Inst<'a>,
+    res: &mut Vec<ast::Stmt<'a>>,
+    pos: usize,
+    depth: usize,
+) {
+    // put *'ptr
+    // ------------------
+    // cpy 'ptr ':arg_1_1
+    // put <:arg_1_1>
+    //
+    //
+    // put **'ptr
+    // ------------------
+    // cpy 'ptr ':arg_2_1
+    // cpy <:arg_2_1> ':arg_1_1
+    // put <:arg_1_1>
+
+    let mut new_args = Vec::with_capacity(inst.args.len());
+
+    for arg in &inst.args {
+        let new_arg = match arg {
+            ast::Arg::Lit(ast::Lit::Deref(box d)) => {
+                let lbl = ast::mk_lbl(format!(":__arg_{}_{}", pos, depth), d.span());
+                solve_arg_deref(d.clone(), lbl.clone(), pos, depth, res);
+                ast::Arg::Lbl(lbl)
+            },
+            otherwise => otherwise.clone(),
+        };
+        new_args.push(new_arg);
+    }
+    res.push(ast::Stmt::Inst(ast::Inst::new(inst.op, new_args, inst.span.clone())));
+}
+
+/*
+fn solve_imediate_labels(stmts: Vec<ast::Stmt>) -> Vec<ast::Stmt> {
+    let mut labels = HashMap::new();
+    let mut off = 0;
+
+    for stmt in &stmts {
+        match stmt {
+            ast::Stmt::Label(lbl) if lbl.starts_with(":") => {
+                if let Some(_) = labels.insert((*lbl).clone(), off) {
+                    panic!("Dupliate direct labels!!!");
+                }
+            },
+            ast::Stmt::Inst(inst) => {
+                off += 1;
+                for arg in &inst.args {
+                    match arg {
+                        ast::Arg::Lbl(lbl) if lbl.starts_with(":") =>
+                            if let Some(_) = labels.insert((*lbl).clone(), off) {
+                                panic!("Dupliate direct labels!!!");
+                            },
+                        _ => (),
+                    }
+                    off += 1;
+                }
+            },
+            _ => (),
+        }
+    }
+
+    let new_stmts = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::Inst(inst) => {
+            },
+            // TODO: Maybe here we should handle literals?
+            _ => (),
+        }
+    }
+
+    new_stmts
+}
+*/
+
+fn desugar_inst<'a>(inst: &ast::Inst<'a>, desugarer: &mut Desugarer<'a>) {
+    fn desugar_inst_rec<'a>(inst: &ast::Inst<'a>, pos: usize, depth: usize) -> Vec<ast::Stmt<'a>> {
+        let mut res = Vec::new();
+        let op = inst.op;
+        match op {
+            ast::Op::Hlt |
+            ast::Op::Add |
+            ast::Op::Mul |
+            ast::Op::Cle |
+            ast::Op::Ceq |
+            ast::Op::Jmp |
+            ast::Op::Beq |
+            ast::Op::Cpy |
+            ast::Op::Put => {
+                desugar_arg_deref(inst, &mut res, pos, depth);
+            },
+        }
+        res
+    }
+
+    let res = desugar_inst_rec(inst, 0, desugarer.get_head_pos());
+    // solve_imediate_labels(res);
+    desugarer.sugar_queue.extend(res);
 }
 
 struct GenState<'a> {
@@ -33,9 +228,9 @@ struct GenState<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct Block<'a> {
+struct Block {
     start: usize,
-    labels: HashMap<&'a str, usize>,
+    labels: HashMap<String, usize>,
 }
 
 struct TapeWriter {
@@ -50,6 +245,14 @@ impl TapeWriter {
             tape: vec![0; TAPE_SIZE],
             idx: 0,
             data_idx,
+        }
+    }
+
+    fn val_at(&self, idx: usize) -> Option<i32> {
+        if idx < self.idx || idx < self.data_idx {
+            self.tape.get(idx).map(Clone::clone)
+        } else {
+            None
         }
     }
 
@@ -85,34 +288,40 @@ impl TapeWriter {
     }
 }
 
+fn get_lbl<'a>(
+    lbl: &ast::Label<'a>,
+    curr_ctxt: &Option<(&String, &Block)>,
+    blocks: &HashMap<String, Block>
+) -> Result<ast::Spanned<'a, i32>, Error> {
+    let span = lbl.span.clone();
+    if lbl.starts_with('.') | lbl.starts_with(':') {
+        if let Some((_, block)) = curr_ctxt {
+            if let Some(off) = block.labels.get(lbl.as_str()) {
+                Ok(ast::Spanned::new(*off as i32, span))
+            } else {
+                error!(format!("label \"{}\" used but not defined", lbl), span)
+            }
+        } else {
+            error!("local label used in global location", span)
+        }
+    } else if let Some(block) = blocks.get(lbl.as_str()) {
+        Ok(ast::Spanned::new(block.start as i32, span))
+    } else {
+        error!(format!("label \"{}\" used but not defined", lbl), span)
+    }
+}
+
 fn expand_lit<'a>(
     lit: &ast::Lit<'a>,
     code_size: usize,
-    curr_ctxt: &Option<(&&str, &Block)>,
-    blocks: &HashMap<&str, Block>,
+    curr_ctxt: &Option<(&String, &Block)>,
+    blocks: &HashMap<String, Block>,
     tape: &mut TapeWriter,
 ) -> Result<ast::Spanned<'a, i32>, Error> {
     match lit {
         ast::Lit::Num(n)   => Ok(ast::Spanned::new(**n, n.span.clone())),
         ast::Lit::Chr(c)   => Ok(ast::Spanned::new(**c as i32, c.span.clone())),
-        ast::Lit::Lbl(lbl) => {
-            let span = lbl.span.clone();
-            if lbl.starts_with('.') {
-                if let Some((_, block)) = curr_ctxt {
-                    if let Some(off) = block.labels.get(lbl.as_ref()) {
-                        Ok(ast::Spanned::new(*off as i32, span))
-                    } else {
-                        error!("label used but not defined", span)
-                    }
-                } else {
-                    error!("local label used in global location", span)
-                }
-            } else if let Some(block) = blocks.get(lbl.as_ref()) {
-                Ok(ast::Spanned::new(block.start as i32, span))
-            } else {
-                error!("label used but not defined", span)
-            }
-        },
+        ast::Lit::Lbl(lbl) => get_lbl(lbl, curr_ctxt, blocks),
         ast::Lit::Ref(lit_ref) => {
             if let ast::Lit::Str(s) = lit_ref.as_ref() {
                 let span = s.span.clone();
@@ -131,31 +340,28 @@ fn expand_lit<'a>(
             }
         },
         ast::Lit::Str(_)   => unreachable!(),
-    }
-}
 
-struct Desugarer<'a> {
-    stmts: &'a [ast::Stmt<'a>],
-    sugar_queue: VecDeque<ast::Stmt<'a>>,
-}
+        // At this point, we are already supposed to have resolved derefs in argument position all
+        // that is left is derefs in literal position.
+        ast::Lit::Deref(box lit) => {
+            let addr = match lit {
+                ast::Lit::Ref(box lit)   => expand_lit(lit, code_size, curr_ctxt, blocks, tape)?,
+                ast::Lit::Deref(box lit) => expand_lit(lit, code_size, curr_ctxt, blocks, tape)?,
+                ast::Lit::Lbl(lbl)       => get_lbl(lbl, curr_ctxt, blocks)?,
 
-impl<'a> Desugarer<'a> {
-    fn new(prog: &'a ast::Prog<'a>) -> Desugarer<'a> {
-        Desugarer {
-            stmts: &prog.stmts,
-            sugar_queue: VecDeque::new(),
-        }
-    }
+                // This should never happen because the parser ensures it.
+                _                        => unreachable!(),
+            };
 
-    fn desugar(&mut self, stmt: &'a ast::Stmt<'a>) {
-        match stmt {
-            ast::Stmt::Inst(inst) =>
-                self.sugar_queue.extend(as_prim_op(inst)),
-
-            ast::Stmt::Lit(_)  |
-            ast::Stmt::Label(_) =>
-                self.sugar_queue.push_back(stmt.clone()),
-        }
+            if let Some(val) = tape.val_at(*addr as usize) {
+                Ok(ast::Spanned::new(val, addr.span))
+            } else {
+                // If a label is defined afterwards and a literal dereference to it is made before,
+                // it will not be able to calculate the dereference because the literal beeing
+                // accessed was not created already.
+                error!("cannot be dereferenced, at least not at compile time", addr.span)
+            }
+        },
     }
 }
 
@@ -165,6 +371,7 @@ impl<'a> Iterator for Desugarer<'a> {
     fn next(&mut self) -> Option<ast::Stmt<'a>> {
         loop {
             if let Some(dequeued) = self.sugar_queue.pop_front() {
+                self.head_pos += 1;
                 break Some(dequeued);
             } else {
                 let (fst, rest) = self.stmts.split_first()?;
@@ -182,8 +389,8 @@ pub fn lit_size(lit: &ast::Lit) -> usize {
     }
 }
 
-pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
-    let mut blocks: HashMap<&str, Block> = HashMap::new();
+pub fn gen_code(prog: &ast::Prog, print_desugared: bool) -> Result<Vec<i32>, Error> {
+    let mut blocks: HashMap<String, Block> = HashMap::new();
     let mut curr_ctxt: Option<(ast::Label, Block)> = None;
 
     let mut desugared = Vec::new();
@@ -192,9 +399,16 @@ pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
     // Solve labels and desugar.
     for stmt in Desugarer::new(prog) {
         match &stmt {
-            ast::Stmt::Label(lbl) if !lbl.starts_with(".") => {
+            ast::Stmt::Label(lbl) if lbl.starts_with('.') | lbl.starts_with(':') => {
+                if let Some((_, ref mut block)) = curr_ctxt {
+                    block.labels.insert(lbl.to_string(), off);
+                } else {
+                    return error!("No parent label", lbl.span.clone());
+                }
+            },
+            ast::Stmt::Label(lbl) => {
                 if let Some((name, block)) = curr_ctxt.take() {
-                    blocks.insert(name.as_ref(), block);
+                    blocks.insert(name.to_inner(), block);
                 }
                 curr_ctxt.replace((
                     lbl.clone(),
@@ -204,19 +418,12 @@ pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
                     })
                 );
             },
-            ast::Stmt::Label(lbl) => {
-                if let Some((_, ref mut block)) = curr_ctxt {
-                    block.labels.insert(lbl.as_ref(), off);
-                } else {
-                    return error!("No parent label", lbl.span.clone());
-                }
-            },
             ast::Stmt::Inst(inst) => {
                 off += 1;
                 for arg in &inst.args {
                     if let ast::Arg::Lbl(lbl) = arg {
                         if let Some((_, ref mut block)) = curr_ctxt {
-                            block.labels.insert(lbl.as_ref(), off);
+                            block.labels.insert(lbl.to_string(), off);
                         } else {
                             return error!("No parent label", lbl.span.clone());
                         }
@@ -231,11 +438,24 @@ pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
         desugared.push(stmt);
     }
 
-    if let Some((name, block)) = curr_ctxt.take() {
-        blocks.insert(name.as_ref(), block);
+    if print_desugared {
+        let mut lvl = 0;
+        for stmt in &desugared {
+            if matches!(stmt, ast::Stmt::Label(_)) {
+                lvl = 0;
+                println!("{:indent$}{}", "", stmt, indent=lvl);
+                lvl = 4;
+            } else {
+                println!("{:indent$}{}", "", stmt, indent=lvl);
+            }
+        }
     }
 
-    let mut curr_ctxt: Option<(&&str, &Block)> = None;
+    if let Some((name, block)) = curr_ctxt.take() {
+        blocks.insert(name.to_inner(), block);
+    }
+
+    let mut curr_ctxt: Option<(&String, &Block)> = None;
     let mut tape = TapeWriter::new(off);
 
     // Build tape
@@ -257,7 +477,7 @@ pub fn gen_code(prog: &ast::Prog) -> Result<Vec<i32>, Error> {
                 }
             },
             ast::Stmt::Label(lbl) if !lbl.starts_with('.') => {
-                let ctxt = blocks.get_key_value(lbl.as_ref()).unwrap();
+                let ctxt = blocks.get_key_value(lbl.as_str()).unwrap();
                 curr_ctxt.replace(ctxt);
             },
             ast::Stmt::Label(_) => (),

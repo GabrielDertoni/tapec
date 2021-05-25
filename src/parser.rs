@@ -17,13 +17,13 @@ macro_rules! error {
     };
 }
 
-fn parse_label(pair: Pair<Rule>) -> Result<Spanned<&str>, Error> {
+fn parse_label(pair: Pair<Rule>) -> Result<Spanned<String>, Error> {
     let ident = pair
         .into_inner()
         .next()
         .unwrap();
 
-    Ok(Spanned::new(ident.as_str(), ident.as_span()))
+    Ok(Spanned::new(ident.as_str().to_string(), ident.as_span()))
 }
 
 fn extract_str(s: &str, span: Span) -> Result<String, Error> {
@@ -62,13 +62,27 @@ fn extract_chr(s: &str) -> char {
     }
 }
 
-fn parse_lbl(pair: Pair<Rule>) -> Result<Spanned<&str>, Error> {
+fn parse_lbl(pair: Pair<Rule>) -> Result<Spanned<String>, Error> {
     let ident = pair
         .into_inner()
         .next()
         .unwrap();
 
-    Ok(Spanned::new(ident.as_str(), ident.as_span()))
+    Ok(Spanned::new(ident.as_str().into(), ident.as_span()))
+}
+
+fn parse_deref(pair: Pair<Rule>) -> Result<Lit, Error> {
+    let deref = pair
+        .into_inner()
+        .next()
+        .unwrap();
+
+    let parsed = match deref.as_rule() {
+        Rule::lit_deref => parse_deref(deref)?,
+        _               => parse_lit(deref)?,
+    };
+
+    Ok(Lit::Deref(Box::new(parsed)))
 }
 
 fn parse_lit(pair: Pair<Rule>) -> Result<Lit, Error> {
@@ -79,15 +93,16 @@ fn parse_lit(pair: Pair<Rule>) -> Result<Lit, Error> {
 
     let span = lit.as_span();
     let parsed = match lit.as_rule() {
-        Rule::lbl     => Lit::Lbl(parse_lbl(lit)?),
-        Rule::num     => match lit.as_str().parse() {
+        Rule::lbl       => Lit::Lbl(parse_lbl(lit)?),
+        Rule::num       => match lit.as_str().parse() {
                             Ok(n)  => Lit::Num(Spanned::new(n, span)),
                             Err(e) => return error!(e.to_string(), span),
-                         },
-        Rule::str     => Lit::Str(Spanned::new(extract_str(lit.as_str(), span.clone())?, span)),
-        Rule::chr     => Lit::Chr(Spanned::new(extract_chr(lit.as_str()), span)),
-        Rule::lit_ref => Lit::Ref(Box::new(parse_lit(lit.into_inner().next().unwrap())?)),
-        _             => unreachable!(),
+                          },
+        Rule::str       => Lit::Str(Spanned::new(extract_str(lit.as_str(), span.clone())?, span)),
+        Rule::chr       => Lit::Chr(Spanned::new(extract_chr(lit.as_str()), span)),
+        Rule::lit_ref   => Lit::Ref(Box::new(parse_lit(lit.into_inner().next().unwrap())?)),
+        Rule::lit_deref => parse_deref(lit)?,
+        _               => unreachable!(),
     };
 
     Ok(parsed)
@@ -97,7 +112,7 @@ fn extract_arg_lbl<'a>(s: &'a str, span: Span<'a>) -> Result<Label<'a>, Error> {
     let len = s.len();
     let inner = &s[1..len-1];
     if inner.chars().nth(0).unwrap() == '.' {
-        Ok(Spanned::new(inner, span))
+        Ok(Spanned::new(inner.to_string(), span))
     } else {
         error!("only local labels can be argument labels", span)
     }

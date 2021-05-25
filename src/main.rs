@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![feature(box_patterns)]
 
 use clap::clap_app;
 
@@ -19,15 +20,17 @@ fn main() -> std::io::Result<()> {
         (about: "A compiler for the Tape programming language")
         (@arg SOURCE: +required "The TapeLang source file to compile")
         (@arg output: -o --output +takes_value "Output compiled tape")
+        (@arg expand: -E --expand "Compile and also print the desugared code")
     ).get_matches();
 
     // Ok, SOURCE is required.
     let src_file = matches.value_of("SOURCE").unwrap();
     let out = matches.value_of("output").unwrap_or("a.out");
+    let expand = matches.is_present("expand");
 
     let source = fs::read_to_string(src_file)?;
 
-    match parse_asm(&source).and_then(|p| gen_code(&p)) {
+    match parse_asm(&source).and_then(|p| gen_code(&p, expand)) {
         Ok(tape) => {
             if out == "-" {
                 for n in tape {
