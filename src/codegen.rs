@@ -210,7 +210,8 @@ fn desugar_inst<'a>(inst: &ast::Inst<'a>, desugarer: &mut Desugarer<'a>) {
             ast::Op::Jmp |
             ast::Op::Beq |
             ast::Op::Cpy |
-            ast::Op::Put => {
+            ast::Op::Put |
+            ast::Op::Ptn => {
                 desugar_arg_deref(inst, &mut res, pos, depth);
             },
         }

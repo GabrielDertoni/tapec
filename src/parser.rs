@@ -150,6 +150,7 @@ fn parse_inst(pair: Pair<Rule>) -> Result<Inst, Error> {
         "beq" => Op::Beq,
         "cpy" => Op::Cpy,
         "put" => Op::Put,
+        "ptn" => Op::Ptn,
         _     => return error!("not a valid instruction", ident.as_span()),
     };
 

@@ -2,15 +2,16 @@ use pest::Span;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Op {
-    Hlt,
-    Add,
-    Mul,
-    Cle,
-    Ceq,
-    Jmp,
-    Beq,
-    Cpy,
-    Put,
+    Hlt = 0,
+    Add = 1,
+    Mul = 2,
+    Cle = 3,
+    Ceq = 4,
+    Jmp = 5,
+    Beq = 6,
+    Cpy = 7,
+    Put = 8,
+    Ptn = 9,
 }
 
 impl Op {
@@ -24,6 +25,7 @@ impl Op {
             Op::Cpy => 2,
             Op::Jmp => 1,
             Op::Put => 1,
+            Op::Ptn => 1,
             Op::Hlt => 0,
         }
     }
@@ -181,6 +183,7 @@ impl Display for Op {
             Op::Beq => "beq",
             Op::Cpy => "cpy",
             Op::Put => "put",
+            Op::Ptn => "ptn",
         };
 
         write!(f, "{}", name)
