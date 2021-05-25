@@ -80,8 +80,7 @@ main:                   ; Inicia um contexto
 .loop:                  ; Label local de um escopo "main"
     cpy 'char_A 'tmp    ; Copia 'A' para a "variável" tmp.
     put 'tmp            ; Imprime o valor de tmp. No caos, 'A'.
-    jmp &'.loop         ; Cria um loop infinito. A necessidade desse '&' se
-                        ; tornará aparente mais afrente.
+    jmp &'.loop         ; Cria um loop infinito. A necessidade desse '&' se tornará aparente mais afrente.
 
 outro:
 .loop:                  ; Não interfere com outro label .loop.
@@ -105,7 +104,7 @@ começarão com um `.`.
 ```asm
 main:
     cpy 'ptr '.arg           ; Copia o valor de ponteiro para .arg.
-    put <.arg>               ; Agora .arg possui 'string e pode imprimir o 'H'.
+    put <.arg>               ; Agora .arg possui 'string e o put pode imprimir o 'H' (primeiro caractere de 'string).
 
 ptr: 'string                 ; Ponteiro para o endereço de string.
 string: "Hello, World\n\0"
@@ -183,7 +182,7 @@ mudar o label `string` para imprimir algo completamente diferente.
 main:
 .loop:
     cpy 'ptr '.cpy_arg     ; Efetivamente dereferencia o ponteiro e coloca o valor em a
-    cpy <.cpy_arg> 'a
+    cpy <.cpy_arg> 'a      ; Na inicialização, o primeiro argumento do cpy será -1
 
     ceq &0 'a 'tmp         ; Compara se o resgistrado a possui o valor 0 e coloca o resultado em tmp
     beq 'tmp &'.loop_end   ; Se tmp for 1, termina o loop. Senão, continue
@@ -199,3 +198,13 @@ a: 0                       ; Registrador A.
 ptr: 'string               ; Aponta para o próximo caractere a ser impresso.
 string: "Hello, world!\n\0"
 ```
+
+## Futuro
+
+A feature de maior preferência no momento é a capacidade de dereferenciar labels
+de maineira automática. Isso seria bom para não precisarmos ficar usando esses
+truques de alterar o valor dos argumentos.
+
+Com essa feature, o exemplo de hello world com ponteiros poderia ser reescrito
+usando `cpy *'ptr 'a` ao invés de aquele truque com os labels de argumento. O
+compilador se encarregará de transformar isso, naquele outro.
