@@ -19,7 +19,7 @@ lit = ${ lit_ref | lit_deref | str | chr | lbl | num }
 lbl = ${ "'" ~ lbl_name }
 lbl_name = @{ "."? ~ ident }
 
-num = @{ number }
+num = @{ "-"? ~ number }
 chr = @{ "'" ~ "\\"? ~ ANY ~ "'"}
 str = @{ "\"" ~ (("\\" ~ ANY) | (!"\"" ~ ANY))* ~ "\"" }
 
