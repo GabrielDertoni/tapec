@@ -26,6 +26,7 @@ jmp <add1>               - ip = tape[add1]
 beq <add1> <add2>        - ip = tape[add1] ? tape[add2] : ip
 cpy <add1> <dest>        - tape[dest] = tape[add1]
 put <add1>               - putchar(tape[add1])
+pnt <add1>               - printf("%d", tape[add1])
 ```
 
 ## Comentários
@@ -199,12 +200,27 @@ ptr: 'string               ; Aponta para o próximo caractere a ser impresso.
 string: "Hello, world!\n\0"
 ```
 
-## Futuro
+## Dereferenciando
 
-A feature de maior preferência no momento é a capacidade de dereferenciar labels
-de maineira automática. Isso seria bom para não precisarmos ficar usando esses
-truques de alterar o valor dos argumentos.
+O truque demonstrado na seção anterior pode ser abstraido através do
+dereferenciamento. Na verdade, o compilador ainda irá gerar uma instrução `cpy`
+a mais para cada uso de dereferenciamento e usará o truque demonstrado acima,
+mas isso é completamente transparente ao programador.
 
-Com essa feature, o exemplo de hello world com ponteiros poderia ser reescrito
-usando `cpy *'ptr 'a` ao invés de aquele truque com os labels de argumento. O
-compilador se encarregará de transformar isso, naquele outro.
+```asm
+main:
+    put **'double_ptr              ; Imprime 'H'
+    hlt
+
+double_ptr: 'ptr
+ptr: 'string
+string: "Hello, world!\n\0"
+```
+
+## TODOs
+- Reutilização de constantes: com essa feature, todos os usos de `&0` no código
+    serão substituídos por um único label. Isso gera um intcode mais legível e
+    compacto. De maneira mais geral, endereços para valores literais não serão
+    replicados.
+- Adicionar palavras chave para organização. `.org`
+- Adicionar pseudoinstruções `call` e `ret`.
