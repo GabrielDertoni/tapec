@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![feature(box_patterns)]
+#![feature(btree_drain_filter)]
 
 use clap::clap_app;
 
@@ -11,7 +12,7 @@ mod parser;
 mod codegen;
 
 use crate::parser::parse_asm;
-use crate::codegen::gen_code;
+use crate::codegen::Assembler;
 
 fn main() -> std::io::Result<()> {
     let matches = clap_app!(tapec =>
@@ -30,7 +31,10 @@ fn main() -> std::io::Result<()> {
 
     let source = fs::read_to_string(src_file)?;
 
-    match parse_asm(&source).and_then(|p| gen_code(&p, expand)) {
+    match parse_asm(&source).and_then(|p| {
+        let asm = Assembler::new(expand);
+        asm.assemble(&p.stmts)
+    }) {
         Ok(tape) => {
             if out == "-" {
                 for n in tape {

@@ -1,7 +1,9 @@
 #![allow(unused_macros)]
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
+
+use pest::Span;
 
 use crate::ast;
 use crate::parser::Error;
@@ -25,30 +27,60 @@ macro_rules! mextract {
 */
 
 macro_rules! inst_args {
-    ($span:expr => (@lit $lit:expr)) => {
-        ast::Arg::Lit($lit)
+    ($span:expr => (@lit $($toks:tt)*)) => {
+        ast::Arg::Lit(lit!($span => $($toks)*))
     };
 
     ($span:expr => (@lbl $lbl:expr)) => {
-        ast::Arg::Lbl($lbl)
+        ast::Arg::Lbl($lbl.into())
     };
 
     ($span:expr => $lit:expr) => {
-        $lit
+        ast::Arg::Lit($lit.into())
+    };
+
+    ($span:expr => <$lbl:ident>) => {
+        ast::Arg::Lbl($lbl.into())
     };
 
     ($span:expr =>) => { };
 }
 
 macro_rules! inst {
-    ($span:expr => $inst:ident, $($tail:tt),*) => {
+    ($span:expr => $inst:ident $($tail:tt)*) => {
         ast::Inst::new(ast::Op::$inst, vec![$(inst_args!($span => $tail)),*], $span)
+    };
+}
+
+macro_rules! lit {
+    ($span:expr => (@num $expr:expr)) => {
+        ast::Lit::Num(ast::Spanned::new($expr, $span.clone()))
+    };
+
+    ($span:expr => (@chr $expr:expr)) => {
+        ast::Lit::Chr(ast::Spanned::new($expr, $span.clone()))
+    };
+
+    ($span:expr => (@str $expr:expr)) => {
+        ast::Lit::Str(ast::Spanned::new($expr, $span.clone()))
+    };
+
+    ($span:expr => @& $($toks:tt)*) => {
+        ast::Lit::Ref(Box::new(lit!($span => $($toks)*)))
+    };
+
+    ($span:expr => $expr:expr) => {
+        ast::Spanned::new($expr, $span.clone()).into()
     };
 }
 
 macro_rules! stmt {
     ($span:expr => label $name:expr) => {
         ast::Stmt::Label(ast::mk_lbl(name, $span.clone()))
+    };
+
+    ($span:expr => lit $($toks:tt)*) => {
+        ast::Stmt::Lit(lit!($span => $($toks)*))
     };
 
     ($span:expr => $($toks:tt)*) => {
@@ -58,440 +90,595 @@ macro_rules! stmt {
 
 macro_rules! stmts {
     ($span:expr => $([$($toks:tt)*])+) => {
-        vec![$(stmt!($span => $($toks)*)),+]
+        &[$(stmt!($span => $($toks)*)),+]
     };
 }
 
 const TAPE_SIZE: usize = 256;
 const EMPTY_DEFAULT: i32 = -1;
 
-struct Desugarer<'a> {
-    stmts: &'a [ast::Stmt<'a>],
-    sugar_queue: VecDeque<ast::Stmt<'a>>,
-    head_pos: usize,
+type Result<T> = std::result::Result<T, Error>;
+
+type Position = usize;
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+struct Ident<'a>(&'a str, usize);
+
+impl<'a> Ident<'a> {
+    #[inline]
+    fn new(name: &'a str, id: usize) -> Ident<'a> {
+        Ident(name, id)
+    }
+
+    #[inline]
+    fn is_local(&self) -> bool {
+        self.0.starts_with(".")
+    }
 }
 
-impl<'a> Desugarer<'a> {
-    fn new(prog: &'a ast::Prog<'a>) -> Desugarer<'a> {
-        Desugarer {
-            stmts: &prog.stmts,
-            sugar_queue: VecDeque::new(),
-            head_pos: 0,
+impl<'a> From<(&'a str, usize)> for Ident<'a> {
+    #[inline]
+    fn from((name, id): (&'a str, usize)) -> Ident<'a> {
+        Ident::new(name, id)
+    }
+}
+
+impl<'a> From<ast::Spanned<'a, (&'a str, usize)>> for Ident<'a> {
+    #[inline]
+    fn from(spanned: ast::Spanned<'a, (&'a str, usize)>) -> Ident<'a> {
+        spanned.inner.into()
+    }
+}
+
+impl<'a> std::fmt::Display for Ident<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)?;
+        if self.1 > 0 {
+            write!(f, "_{:02x}", self.1)?;
+        }
+        Ok(())
+    }
+}
+
+struct LabelRef<'a> {
+    // Where the reference was on the tape.
+    pos: Position,
+    // The token that used the reference.
+    span: Span<'a>,
+}
+
+impl<'a> LabelRef<'a> {
+    #[inline]
+    fn new(pos: Position, span: Span<'a>) -> LabelRef<'a> {
+        LabelRef { pos, span }
+    }
+}
+
+impl<'a> std::fmt::Display for LabelRef<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (line, col) = self.span.start_pos().line_col();
+        write!(f, "{} at {}:{} -> {}", self.span.as_str(), line, col, self.pos)
+    }
+}
+
+impl<'a> std::fmt::Debug for LabelRef<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+enum Auto<'a> {
+    Lbl(Ident<'a>, u32),
+    Num(i32, u32),
+    Str(&'a str, u32),
+}
+
+impl<'a> Auto<'a> {
+    fn unwrap_lbl(self) -> (Ident<'a>, u32) {
+        if let Auto::Lbl(s, lvl) = self {
+            (s, lvl)
+        } else {
+            panic!("tried to `unwrap_lbl` on Auto that is not Auto::Lbl")
         }
     }
 
-    fn desugar(&mut self, stmt: &ast::Stmt<'a>) {
-        match stmt {
-            ast::Stmt::Inst(inst) => desugar_inst(inst, self),
-            ast::Stmt::Lit(_)  |
-            ast::Stmt::Label(_) =>
-                self.sugar_queue.push_back(stmt.clone()),
+    fn unwrap_num(self) -> (i32, u32) {
+        if let Auto::Num(num, lvl) = self {
+            (num, lvl)
+        } else {
+            panic!("tried to `unwrap_num` on Auto that is not Auto::Num")
         }
     }
 
-    fn push_sugar(&mut self, stmt: ast::Stmt<'a>) {
-        self.sugar_queue.push_back(stmt);
+    fn unwrap_str(self) -> (&'a str, u32) {
+        if let Auto::Str(s, lvl) = self {
+            (s, lvl)
+        } else {
+            panic!("tried to `unwrap_str` on Auto that is not Auto::Str")
+        }
     }
 
-    fn get_head_pos(&self) -> usize { self.head_pos }
-}
-
-fn solve_arg_deref<'a>(
-    deref_to: ast::Lit<'a>,
-    lbl: ast::Label<'a>,
-    pos: usize,
-    depth: usize,
-    stmts: &mut Vec<ast::Stmt<'a>>
-) {
-    match deref_to {
-        ast::Lit::Deref(box deref) => {
-            let cpy_lbl = ast::mk_lbl(format!(":__cpy_{}_{}", pos, depth + 1), deref.span());
-            solve_arg_deref(deref.clone(), cpy_lbl.clone(), pos, depth + 1, stmts);
-            let lbl_lit = ast::Lit::Lbl(lbl);
-
-            let stmt = stmt!(deref.span() => Cpy, (@lbl cpy_lbl), (@lit lbl_lit));
-            stmts.push(stmt);
-        },
-        other => {
-            let lbl_lit = ast::Lit::Lbl(lbl);
-            let span = other.span();
-            stmts.push(stmt!(span => Cpy, (@lit other), (@lit lbl_lit)));
-        },
+    fn ref_lvl(&self) -> u32 {
+        match self {
+            &Auto::Lbl(_, lvl) |
+            &Auto::Str(_, lvl) |
+            &Auto::Num(_, lvl) => lvl
+        }
     }
+
+    fn is_lbl(&self) -> bool { matches!(self, Auto::Lbl(..)) }
+    fn is_num(&self) -> bool { matches!(self, Auto::Num(..)) }
+    fn is_str(&self) -> bool { matches!(self, Auto::Str(..)) }
 }
 
-fn desugar_arg_deref<'a>(
-    inst: &ast::Inst<'a>,
-    res: &mut Vec<ast::Stmt<'a>>,
-    pos: usize,
-    depth: usize,
-) {
-    // put *'ptr
-    // ------------------
-    // cpy 'ptr ':arg_1_1
-    // put <:arg_1_1>
-    //
-    //
-    // put **'ptr
-    // ------------------
-    // cpy 'ptr ':arg_2_1
-    // cpy <:arg_2_1> ':arg_1_1
-    // put <:arg_1_1>
+impl<'a> std::fmt::Display for Auto<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use Auto::*;
 
-    let mut new_args = Vec::with_capacity(inst.args.len());
-
-    for arg in &inst.args {
-        let new_arg = match arg {
-            ast::Arg::Lit(ast::Lit::Deref(box d)) => {
-                let lbl = ast::mk_lbl(format!(":__arg_{}_{}", pos, depth), d.span());
-                solve_arg_deref(d.clone(), lbl.clone(), pos, depth, res);
-                ast::Arg::Lbl(lbl)
-            },
-            otherwise => otherwise.clone(),
-        };
-        new_args.push(new_arg);
-    }
-    res.push(ast::Stmt::Inst(ast::Inst::new(inst.op, new_args, inst.span.clone())));
-}
-
-/*
-fn solve_imediate_labels(stmts: Vec<ast::Stmt>) -> Vec<ast::Stmt> {
-    let mut labels = HashMap::new();
-    let mut off = 0;
-
-    for stmt in &stmts {
-        match stmt {
-            ast::Stmt::Label(lbl) if lbl.starts_with(":") => {
-                if let Some(_) = labels.insert((*lbl).clone(), off) {
-                    panic!("Dupliate direct labels!!!");
-                }
-            },
-            ast::Stmt::Inst(inst) => {
-                off += 1;
-                for arg in &inst.args {
-                    match arg {
-                        ast::Arg::Lbl(lbl) if lbl.starts_with(":") =>
-                            if let Some(_) = labels.insert((*lbl).clone(), off) {
-                                panic!("Dupliate direct labels!!!");
-                            },
-                        _ => (),
+        match self {
+            Lbl(ident, lvl) => {
+                if *lvl > 0 {
+                    write!(f, "'__lbl_")?;
+                    for _ in 0..*lvl {
+                        write!(f, "ref_")?;
                     }
-                    off += 1;
                 }
+                write!(f, "{}", ident.0)?;
+                if ident.1 > 0 {
+                    write!(f, "_{:02x}", ident.1)?;
+                }
+                Ok(())
             },
-            _ => (),
-        }
-    }
-
-    let new_stmts = Vec::new();
-    for stmt in stmts {
-        match stmt {
-            ast::Stmt::Inst(inst) => {
+            Num(num, lvl)  => {
+                write!(f, "'__num_")?;
+                for _ in 0..*lvl {
+                    write!(f, "ref_")?;
+                }
+                write!(f, "{}", num)
             },
-            // TODO: Maybe here we should handle literals?
-            _ => (),
-        }
-    }
-
-    new_stmts
-}
-*/
-
-fn desugar_inst<'a>(inst: &ast::Inst<'a>, desugarer: &mut Desugarer<'a>) {
-    fn desugar_inst_rec<'a>(inst: &ast::Inst<'a>, pos: usize, depth: usize) -> Vec<ast::Stmt<'a>> {
-        let mut res = Vec::new();
-        let op = inst.op;
-        match op {
-            ast::Op::Hlt |
-            ast::Op::Add |
-            ast::Op::Mul |
-            ast::Op::Cle |
-            ast::Op::Ceq |
-            ast::Op::Jmp |
-            ast::Op::Beq |
-            ast::Op::Cpy |
-            ast::Op::Put |
-            ast::Op::Ptn => {
-                desugar_arg_deref(inst, &mut res, pos, depth);
+            Str(s, lvl)    => {
+                write!(f, "'__str_")?;
+                for _ in 0..*lvl {
+                    write!(f, "ref_")?;
+                }
+                write!(f, "#[{}]", s)
             },
         }
-        res
     }
-
-    let res = desugar_inst_rec(inst, 0, desugarer.get_head_pos());
-    // solve_imediate_labels(res);
-    desugarer.sugar_queue.extend(res);
 }
 
-struct GenState<'a> {
-    tape: Vec<ast::Inst<'a>>,
-    labels: HashMap<ast::Label<'a>, usize>,
+pub struct Assembler<'a> {
+    tape: [i32; TAPE_SIZE],
+    pos: usize,
+    expand: bool,
+    labels: HashMap<Ident<'a>, Position>,
+    locals: HashMap<Ident<'a>, Position>,
+    lit_uses: BTreeMap<Auto<'a>, Vec<LabelRef<'a>>>,
+    macro_count: usize,
 }
 
-#[derive(Debug, Clone)]
-struct Block {
-    start: usize,
-    labels: HashMap<String, usize>,
-}
-
-struct TapeWriter {
-    tape: Vec<i32>,
-    idx: usize,
-    data_idx: usize,
-}
-
-impl TapeWriter {
-    fn new(data_idx: usize) -> TapeWriter {
-        TapeWriter {
-            tape: vec![0; TAPE_SIZE],
-            idx: 0,
-            data_idx,
+impl<'a> Assembler<'a> {
+    pub fn new(expand: bool) -> Assembler<'a> {
+        Assembler {
+            tape: [0; TAPE_SIZE],
+            pos: 0,
+            expand,
+            labels: HashMap::new(),
+            locals: HashMap::new(),
+            lit_uses: BTreeMap::new(),
+            macro_count: 0,
         }
     }
 
-    fn val_at(&self, idx: usize) -> Option<i32> {
-        if idx < self.idx || idx < self.data_idx {
-            self.tape.get(idx).map(Clone::clone)
-        } else {
-            None
+    fn get_pos(&self) -> usize {
+        // self.tape.len()
+        self.pos
+    }
+
+    fn push_tape(&mut self, v: i32) {
+        // self.tape.push(v)
+        if self.pos >= TAPE_SIZE {
+            panic!("TAPE SIZE EXCEEDED");
         }
+        self.tape[self.pos] = v;
+        self.pos += 1;
     }
 
-    fn write(&mut self, val: i32) -> usize {
-        let i = self.idx;
-        self.tape[i] = val;
-        self.idx += 1;
-        i
-    }
-
-    fn write_str(&mut self, s: &str) -> usize {
-        let i = self.idx;
-        for c in s.chars() {
-            self.write(c as i32);
-        }
-        i
-    }
-
-    fn write_end(&mut self, val: i32) -> Option<usize> {
-        let i = self.data_idx;
-        let pos = self.tape.get_mut(i)?;
-        *pos = val;
-        self.data_idx += 1;
-        Some(i)
-    }
-
-    fn write_end_str(&mut self, s: &str) -> Option<usize> {
-        let i = self.idx;
-        for c in s.chars() {
-            self.write_end(c as i32)?;
-        }
-        Some(i)
-    }
-}
-
-fn get_lbl<'a>(
-    lbl: &ast::Label<'a>,
-    curr_ctxt: &Option<(&String, &Block)>,
-    blocks: &HashMap<String, Block>
-) -> Result<ast::Spanned<'a, i32>, Error> {
-    let span = lbl.span.clone();
-    if lbl.starts_with('.') | lbl.starts_with(':') {
-        if let Some((_, block)) = curr_ctxt {
-            if let Some(off) = block.labels.get(lbl.as_str()) {
-                Ok(ast::Spanned::new(*off as i32, span))
+    fn push_string(&mut self, s: &str, span: Span<'a>) -> Result<usize> {
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 1;
+                let escaped = match bytes[i] {
+                    b'n'  => b'\n',
+                    b'r'  => b'\r',
+                    b't'  => b'\t',
+                    b'\\' => b'\\',
+                    b'\'' => b'\'',
+                    b'0'  => b'\0',
+                    other => return error!(format!("invalid escape character '\\{}'", other as char), span),
+                };
+                self.push_tape(escaped as i32);
             } else {
-                error!(format!("label \"{}\" used but not defined", lbl), span)
+                self.push_tape(bytes[i] as i32);
             }
-        } else {
-            error!("local label used in global location", span)
+            i += 1
         }
-    } else if let Some(block) = blocks.get(lbl.as_str()) {
-        Ok(ast::Spanned::new(block.start as i32, span))
-    } else {
-        error!(format!("label \"{}\" used but not defined", lbl), span)
+
+        Ok(i)
     }
-}
 
-fn expand_lit<'a>(
-    lit: &ast::Lit<'a>,
-    code_size: usize,
-    curr_ctxt: &Option<(&String, &Block)>,
-    blocks: &HashMap<String, Block>,
-    tape: &mut TapeWriter,
-) -> Result<ast::Spanned<'a, i32>, Error> {
-    match lit {
-        ast::Lit::Num(n)   => Ok(ast::Spanned::new(**n, n.span.clone())),
-        ast::Lit::Chr(c)   => Ok(ast::Spanned::new(**c as i32, c.span.clone())),
-        ast::Lit::Lbl(lbl) => get_lbl(lbl, curr_ctxt, blocks),
-        ast::Lit::Ref(lit_ref) => {
-            if let ast::Lit::Str(s) = lit_ref.as_ref() {
-                let span = s.span.clone();
-                if let Some(v) = tape.write_end_str(s.as_str()) {
-                    Ok(ast::Spanned::new(v as i32, span))
-                } else {
-                    error!("tape size exceeded", span)
-                }
-            } else {
-                let res = expand_lit(lit_ref, code_size, curr_ctxt, blocks, tape)?;
-                if let Some(val) = tape.write_end(*res) {
-                    Ok(ast::Spanned::new(val as i32, res.span))
-                } else {
-                    error!("tape size exceeded", res.span)
-                }
-            }
-        },
-        ast::Lit::Str(_)   => unreachable!(),
+    pub fn assemble(mut self, stmts: &[ast::Stmt<'a>]) -> Result<[i32; TAPE_SIZE]> {
+        self.assemble_stmts(stmts)?;
 
-        // At this point, we are already supposed to have resolved derefs in argument position all
-        // that is left is derefs in literal position.
-        ast::Lit::Deref(box lit) => {
-            let addr = match lit {
-                ast::Lit::Ref(box lit)   => expand_lit(lit, code_size, curr_ctxt, blocks, tape)?,
-                ast::Lit::Deref(box lit) => expand_lit(lit, code_size, curr_ctxt, blocks, tape)?,
-                ast::Lit::Lbl(lbl)       => get_lbl(lbl, curr_ctxt, blocks)?,
+        self.solve_locals()?;
 
-                // This should never happen because the parser ensures it.
-                _                        => unreachable!(),
-            };
-
-            if let Some(val) = tape.val_at(*addr as usize) {
-                Ok(ast::Spanned::new(val, addr.span))
-            } else {
-                // If a label is defined afterwards and a literal dereference to it is made before,
-                // it will not be able to calculate the dereference because the literal beeing
-                // accessed was not created already.
-                error!("cannot be dereferenced, at least not at compile time", addr.span)
-            }
-        },
-    }
-}
-
-impl<'a> Iterator for Desugarer<'a> {
-    type Item = ast::Stmt<'a>;
-
-    fn next(&mut self) -> Option<ast::Stmt<'a>> {
-        loop {
-            if let Some(dequeued) = self.sugar_queue.pop_front() {
-                self.head_pos += 1;
-                break Some(dequeued);
-            } else {
-                let (fst, rest) = self.stmts.split_first()?;
-                self.stmts = rest;
-                self.desugar(&fst);
-            }
+        #[derive(PartialEq, Eq)]
+        enum SolveState {
+            Labels,
+            Nums,
+            Strs,
         }
-    }
-}
 
-pub fn lit_size(lit: &ast::Lit) -> usize {
-    match lit {
-        ast::Lit::Str(s) => s.len(),
-        _                => 1,
-    }
-}
+        let mut prev_state = SolveState::Labels;
+        let mut prev_lvl = 0;
+        let mut prev_val = 0;
 
-pub fn gen_code(prog: &ast::Prog, print_desugared: bool) -> Result<Vec<i32>, Error> {
-    let mut blocks: HashMap<String, Block> = HashMap::new();
-    let mut curr_ctxt: Option<(ast::Label, Block)> = None;
+        let mut prev_lbl_name = "__none";
+        let mut prev_num = 0;
+        let mut prev_str = "";
 
-    let mut desugared = Vec::new();
-
-    let mut off = 0;
-    // Solve labels and desugar.
-    for stmt in Desugarer::new(prog) {
-        match &stmt {
-            ast::Stmt::Label(lbl) if lbl.starts_with('.') | lbl.starts_with(':') => {
-                if let Some((_, ref mut block)) = curr_ctxt {
-                    block.labels.insert(lbl.to_string(), off);
-                } else {
-                    return error!("No parent label", lbl.span.clone());
-                }
-            },
-            ast::Stmt::Label(lbl) => {
-                if let Some((name, block)) = curr_ctxt.take() {
-                    blocks.insert(name.to_inner(), block);
-                }
-                curr_ctxt.replace((
-                    lbl.clone(),
-                    Block {
-                        start: off,
-                        labels: HashMap::new()
-                    })
-                );
-            },
-            ast::Stmt::Inst(inst) => {
-                off += 1;
-                for arg in &inst.args {
-                    if let ast::Arg::Lbl(lbl) = arg {
-                        if let Some((_, ref mut block)) = curr_ctxt {
-                            block.labels.insert(lbl.to_string(), off);
+        for (auto, uses) in std::mem::take(&mut self.lit_uses) {
+            match auto {
+                Auto::Lbl(lbl, ref_lvl) => {
+                    if prev_lbl_name != lbl.0 {
+                        prev_lvl = 0;
+                        if let Some(pos) = self.labels.get(&lbl) {
+                            prev_val = *pos as i32;
                         } else {
-                            return error!("No parent label", lbl.span.clone());
+                            return error!("label was not defined", uses[0].span.clone());
                         }
                     }
-                    off += 1;
-                }
-            },
-            ast::Stmt::Lit(lit) => {
-                off += lit_size(lit);
-            },
-        }
-        desugared.push(stmt);
-    }
 
-    if print_desugared {
-        let mut lvl = 0;
-        for stmt in &desugared {
-            if matches!(stmt, ast::Stmt::Label(_)) {
-                lvl = 0;
-                println!("{:indent$}{}", "", stmt, indent=lvl);
-                lvl = 4;
-            } else {
-                println!("{:indent$}{}", "", stmt, indent=lvl);
+                    for _ in prev_lvl + 1..=ref_lvl {
+                        let pos = self.get_pos();
+                        self.push_tape(prev_val);
+                        prev_val = pos as i32;
+                    }
+                    prev_lbl_name = lbl.0;
+                    prev_lvl = ref_lvl;
+                },
+                Auto::Num(num, ref_lvl) => {
+                    if prev_state != SolveState::Nums || prev_num != num {
+                        prev_state = SolveState::Nums;
+                        prev_val = num;
+                        prev_lvl = 0;
+                    }
+
+                    for _ in prev_lvl + 1..=ref_lvl {
+                        let pos = self.get_pos();
+                        self.push_tape(prev_val);
+                        prev_val = pos as i32;
+                    }
+                    prev_lvl = ref_lvl;
+                    prev_num = num;
+                },
+                Auto::Str(s, ref_lvl) => {
+                    if prev_state != SolveState::Strs || prev_str != s {
+                        prev_state = SolveState::Strs;
+                        prev_val = self.get_pos() as i32;
+
+                        self.push_string(s, uses[0].span.clone())?;
+
+                        prev_lvl = 1;
+                    }
+
+                    for _ in prev_lvl + 1..=ref_lvl {
+                        let pos = self.get_pos();
+                        self.push_tape(prev_val);
+                        prev_val = pos as i32;
+                    }
+                    prev_lvl = ref_lvl;
+                    prev_str = s;
+                },
+            }
+
+            for lbl_ref in &uses {
+                self.tape[lbl_ref.pos] = prev_val;
             }
         }
+
+        Ok(self.tape)
     }
 
-    if let Some((name, block)) = curr_ctxt.take() {
-        blocks.insert(name.to_inner(), block);
+    fn assemble_stmts(&mut self, stmts: &[ast::Stmt<'a>]) -> Result<usize> {
+        let mut count = 0;
+        for stmt in stmts {
+            count += self.assemble_stmt(stmt)?;
+        }
+        Ok(count)
     }
 
-    let mut curr_ctxt: Option<(&String, &Block)> = None;
-    let mut tape = TapeWriter::new(off);
+    fn assemble_stmt(&mut self, stmt: &ast::Stmt<'a>) -> Result<usize> {
+        use ast::Stmt::*;
 
-    // Build tape
-    for stmt in &desugared {
         match stmt {
-            ast::Stmt::Inst(inst) => {
-                tape.write(inst.op as i32);
-
-                for arg in &inst.args {
-                    match arg {
-                        ast::Arg::Lit(lit) => {
-                            let val = expand_lit(lit, off, &curr_ctxt, &blocks, &mut tape)?;
-                            tape.write(*val);
-                        },
-                        ast::Arg::Lbl(_) => {
-                            tape.write(EMPTY_DEFAULT);
-                        },
-                    }
+            Label(lbl) if Ident::from(lbl.inner).is_local() => {
+                self.add_local_lbl(lbl)?;
+                Ok(0)
+            },
+            Label(lbl) => {
+                self.add_global_lbl(lbl)?;
+                if self.expand {
+                    println!("{}:", lbl.0);
                 }
+                Ok(0)
             },
-            ast::Stmt::Label(lbl) if !lbl.starts_with('.') => {
-                let ctxt = blocks.get_key_value(lbl.as_str()).unwrap();
-                curr_ctxt.replace(ctxt);
+            Inst(inst) => self.assemble_inst(inst),
+            Lit(lit)   => {
+                if self.expand {
+                    if self.labels.len() > 0 {
+                        print!("\t");
+                    }
+                    println!("{}", lit);
+                }
+                self.assemble_lit(lit)
             },
-            ast::Stmt::Label(_) => (),
-            ast::Stmt::Lit(lit) => {
-                if let ast::Lit::Str(s) = lit {
-                    tape.write_str(s.as_ref());
-                } else {
-                    let val = expand_lit(lit, off, &curr_ctxt, &blocks, &mut tape)?;
-                    tape.write(*val);
+        }
+    }
+
+    fn assemble_inst(&mut self, inst: &ast::Inst<'a>) -> Result<usize> {
+        use ast::Op::*;
+        use ast::{ Arg, Lit };
+
+        let mut count = 0;
+        match inst.op {
+            Add | Mul | Cle | Ceq | Beq |
+            Cpy | Jmp | Put | Ptn | Hlt => {
+                // The maximum number of arguments in a single instruction is 3.
+                let mut arg_vals = [0; 3];
+
+                let mut desugared_inst = inst.clone();
+
+                for (i, arg) in inst.args.iter().enumerate() {
+                    let span = arg.span();
+                    let val = match arg {
+                        Arg::Lit(lit) => {
+                            if let Lit::Deref(box deref) = ast::reduce_lit(lit) {
+
+                                let macro_lbl = self.unique_lbl(".__deref_arg", span);
+                                let gen = self.assemble_deref_arg(&deref, &macro_lbl)?;
+
+                                let pos = self.get_pos();
+                                self.add_local_lbl_to(&macro_lbl, pos + i + 1)?;
+
+                                count += gen;
+                                desugared_inst.args[i] = ast::Arg::Lbl(macro_lbl);
+                                EMPTY_DEFAULT
+                            } else {
+                                self.assemble_arg(arg, i)?
+                            }
+                        },
+                        arg => self.assemble_arg(arg, i)?,
+                    };
+                    arg_vals[i] = val;
+                }
+
+                if self.expand {
+                    if self.labels.len() > 0 {
+                        print!("\t");
+                    }
+                    println!("{}", desugared_inst);
+                }
+
+                self.push_tape(inst.op as i32);
+                for i in 0..inst.args.len() {
+                    self.push_tape(arg_vals[i]);
+                }
+                count += 1 + inst.args.len();
+            },
+        }
+        Ok(count)
+    }
+
+    fn assemble_deref_arg(&mut self, lit: &ast::Lit<'a>, macro_lbl: &ast::Label<'a>) -> Result<usize> {
+        use ast::{ Lit, Spanned };
+
+        match lit {
+            Lit::Num(Spanned { span, .. }) |
+            Lit::Chr(Spanned { span, .. }) |
+            Lit::Str(Spanned { span, .. }) =>
+                error!("cannot dereference this type", span.clone()),
+
+            Lit::Lbl(lbl) =>
+                self.assemble_stmts(stmts! { lbl.span() =>
+                    [Cpy (lbl.clone()) (@lit macro_lbl.inner)]
+                }),
+
+            Lit::Deref(_) =>
+                self.assemble_stmts(stmts! { lit.span() =>
+                    [Cpy (lit.clone()) (@lit macro_lbl.inner)]
+                }),
+
+            Lit::Ref(_) =>
+                unreachable!("In this case it means that there would be a *&. \
+                              But this should already have been reduced by this step."),
+        }
+    }
+
+    fn assemble_arg(&mut self, arg: &ast::Arg<'a>, arg_idx: usize) -> Result<i32> {
+        use ast::{ Arg, Lit };
+
+        let arg_pos = self.get_pos() + arg_idx + 1;
+        match arg {
+            Arg::Lbl(lbl) => {
+                self.add_local_lbl_to(lbl, arg_pos)?;
+                Ok(arg_pos as i32)
+            },
+            Arg::Lit(lit) => {
+                match lit {
+                    Lit::Num(num)   => Ok(num.inner),
+                    Lit::Chr(chr)   => Ok(chr.inner as i32),
+                    Lit::Lbl(lbl)   => Ok(self.get_label(lbl, arg_pos) as i32),
+                    Lit::Ref(box r) => self.get_value(r, 1, arg_pos).map(|v| v as i32),
+                    Lit::Str(s)     => error!("string literal in argument position is not allowed", s.span()),
+                    Lit::Deref(_)   => Ok(0),
                 }
             },
         }
     }
 
-    Ok(tape.tape)
+    fn assemble_lit(&mut self, lit: &ast::Lit<'a>) -> Result<usize> {
+        use ast::Lit;
+
+        match lit {
+            Lit::Num(num)     => {
+                self.push_tape(**num);
+                Ok(1)
+            },
+            Lit::Chr(chr)     => {
+                self.push_tape(**chr as i32);
+                Ok(1)
+            },
+            Lit::Str(s)       => {
+                self.push_string(s.inner, s.span.clone())
+            },
+            // TODO: Remove this requirement.
+            Lit::Lbl(lbl)     => {
+                let val = self.get_label(lbl, self.get_pos()) as i32;
+                self.push_tape(val);
+                Ok(1)
+            },
+            Lit::Ref(box r)   => {
+                let val = self.get_value(r, 1, self.get_pos())? as i32;
+                self.push_tape(val);
+                Ok(1)
+            },
+            Lit::Deref(box d) => return error!("derefs not allowed here", d.span())
+        }
+    }
+
+    fn get_value(&mut self, mut lit: &ast::Lit<'a>, mut ref_lvl: u32, use_pos: usize) -> Result<Position> {
+        use ast::Lit;
+
+        loop {
+            match lit {
+                Lit::Chr(chr)   => {
+                    break self.lit_uses
+                        .entry(Auto::Num(chr.inner as i32, ref_lvl))
+                        .or_default()
+                        .push(LabelRef::new(use_pos, chr.span()));
+                    },
+                Lit::Num(num)   => {
+                    break self.lit_uses
+                        .entry(Auto::Num(num.inner, ref_lvl))
+                        .or_default()
+                        .push(LabelRef::new(use_pos, num.span()));
+                    },
+                Lit::Str(s)     => {
+                    break self.lit_uses
+                        .entry(Auto::Str(s.inner, ref_lvl))
+                        .or_default()
+                        .push(LabelRef::new(use_pos, s.span()));
+                    },
+                Lit::Lbl(lbl)   => {
+                    break self.lit_uses
+                        .entry(Auto::Lbl(Ident::from(lbl.inner), ref_lvl))
+                        .or_default()
+                        .push(LabelRef::new(use_pos, lbl.span()));
+                    },
+                Lit::Ref(box r) => {
+                    lit = r;
+                    ref_lvl += 1;
+                },
+                Lit::Deref(d)   => {
+                    return error!("derefs are not allowed here", d.span())
+                },
+            }
+        }
+        Ok(0)
+    }
+
+    fn get_label(&mut self, lbl: &ast::Label<'a>, pos: usize) -> Position {
+        let labels = if Ident::from(lbl.inner).is_local() { &mut self.locals } else { &mut self.labels };
+
+        let ident = Ident::from(lbl.inner);
+        if let Some(pos) = labels.get(&ident).copied() {
+            pos
+        } else {
+            let lbl_ref = LabelRef::new(pos, lbl.span());
+            self.lit_uses
+                .entry(Auto::Lbl(ident, 0))
+                .or_default()
+                .push(lbl_ref);
+
+            0
+        }
+    }
+
+    #[inline]
+    fn add_local_lbl(&mut self, lbl: &ast::Label<'a>) -> Result<()> {
+        self.add_local_lbl_to(lbl, self.get_pos())
+    }
+
+    fn add_local_lbl_to(&mut self, lbl: &ast::Label<'a>, to: usize) -> Result<()> {
+        use std::collections::hash_map::Entry::*;
+
+        match self.locals.entry(Ident::from(lbl.inner)) {
+            Occupied(_)   => error!("label defined twice", lbl.span.clone()),
+            Vacant(entry) => {
+                entry.insert(to);
+                Ok(())
+            },
+        }
+    }
+
+    fn add_global_lbl(&mut self, lbl: &ast::Label<'a>) -> Result<()> {
+        use std::collections::hash_map::Entry::*;
+
+        let curr_pos = self.get_pos();
+
+        match self.labels.entry(Ident::from(lbl.inner)) {
+            Occupied(_)   => error!("label defined twice", lbl.span.clone()),
+            Vacant(entry) => {
+                entry.insert(curr_pos);
+                self.solve_locals()
+            },
+        }
+    }
+
+    fn solve_locals(&mut self) -> Result<()> {
+        use std::collections::btree_map::Entry::*;
+
+        // Removes all uses of local labels in values and replaces them with uses of actual
+        // numbers.
+        for (lbl, pos) in self.locals.drain() {
+
+            let local_lbl_uses: Vec<_> = self.lit_uses
+                .drain_filter(|k, _| (Auto::Lbl(lbl, 0)..=Auto::Lbl(lbl, u32::MAX)).contains(k))
+                .collect();
+
+            for (auto, uses) in local_lbl_uses {
+                match self.lit_uses.entry(Auto::Num(pos as i32, auto.unwrap_lbl().1)) {
+                    Occupied(entry) => entry.into_mut().extend(uses),
+                    Vacant(entry)   => { entry.insert(uses); },
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn unique_ident<'b: 'a>(&mut self, name: &'b str) -> Ident<'a> {
+        self.macro_count += 1;
+        Ident::new(name, self.macro_count)
+    }
+
+    fn unique_lbl<'b: 'a>(&mut self, name: &'b str, span: Span<'a>) -> ast::Label<'a> {
+        self.macro_count += 1;
+        ast::Spanned::new((name, self.macro_count), span)
+    }
 }
+

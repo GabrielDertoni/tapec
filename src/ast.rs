@@ -1,5 +1,25 @@
 use pest::Span;
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub struct Spanned<'a, T> {
+    pub inner: T,
+    pub span: Span<'a>,
+}
+
+impl<'a, T> Spanned<'a, T> {
+    pub fn span(&self) -> Span<'a> { self.span.clone() }
+}
+
+impl<'a, T> Spanned<'a, T> {
+    pub fn new(inner: T, span: Span<'a>) -> Spanned<'a, T> {
+        Spanned { inner, span }
+    }
+
+    pub fn to_inner(self) -> T {
+        self.inner
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Op {
     Hlt = 0,
@@ -43,7 +63,10 @@ pub enum Stmt<'a> {
     Lit(Lit<'a>),
 }
 
-pub type Label<'a> = Spanned<'a, String>;
+pub type Label<'a> = Spanned<'a, (&'a str, usize)>;
+pub type Num<'a> = Spanned<'a, i32>;
+pub type Str<'a> = Spanned<'a, &'a str>;
+pub type Chr<'a> = Spanned<'a, char>;
 
 #[derive(Debug, Clone)]
 pub struct Inst<'a> {
@@ -55,9 +78,9 @@ pub struct Inst<'a> {
 #[derive(Debug, Clone)]
 pub enum Lit<'a> {
     Lbl(Label<'a>),
-    Num(Spanned<'a, i32>),
-    Str(Spanned<'a, String>),
-    Chr(Spanned<'a, char>),
+    Num(Num<'a>),
+    Chr(Chr<'a>),
+    Str(Str<'a>),
     Ref(Box<Lit<'a>>),
     // Actually not every lit can be inside `Deref`, only `Lbl`, `Deref` or `Ref`.
     // This is ensured in parsing though.
@@ -83,19 +106,17 @@ pub enum Arg<'a> {
     Lbl(Label<'a>),
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub struct Spanned<'a, T> {
-    pub inner: T,
-    pub span: Span<'a>,
-}
-
-impl<'a, T> Spanned<'a, T> {
-    pub fn new(inner: T, span: Span<'a>) -> Spanned<'a, T> {
-        Spanned { inner, span }
-    }
-
-    pub fn to_inner(self) -> T {
-        self.inner
+pub fn reduce_lit<'a>(lit: &Lit<'a>) -> Lit<'a> {
+    match lit {
+        Lit::Deref(box deref) => {
+            let reduced = reduce_lit(deref);
+            if let Lit::Ref(box next_reduction) = reduced {
+                next_reduction.clone()
+            } else {
+                Lit::Deref(Box::new(reduced))
+            }
+        },
+        other => other.clone(),
     }
 }
 
@@ -114,8 +135,8 @@ impl<'a, T> std::convert::AsRef<T> for Spanned<'a, T> {
     }
 }
 
-pub fn mk_lbl(name: String, span: Span) -> Label {
-    Spanned::new(name, span)
+pub fn mk_lbl<'a>(name: &'a str, span: Span<'a>) -> Label<'a> {
+    Spanned::new((name, 0), span)
 }
 
 impl<'a> Inst<'a> {
@@ -124,13 +145,46 @@ impl<'a> Inst<'a> {
     }
 }
 
+impl<'a> Arg<'a> {
+    pub fn span(&self) -> Span<'a> {
+        match self {
+            Arg::Lbl(lbl) => lbl.span(),
+            Arg::Lit(lit) => lit.span(),
+        }
+    }
+}
+
+impl<'a> From<Label<'a>> for Arg<'a> {
+    fn from(v: Label<'a>) -> Arg<'a> { Arg::Lbl(v) }
+}
+
+impl<'a> From<Lit<'a>> for Arg<'a> {
+    fn from(v: Lit<'a>) -> Arg<'a> { Arg::Lit(v) }
+}
+
+impl<'a> From<Num<'a>> for Lit<'a> {
+    fn from(v: Num<'a>) -> Lit<'a> { Lit::Num(v) }
+}
+
+impl<'a> From<Chr<'a>> for Lit<'a> {
+    fn from(v: Chr<'a>) -> Lit<'a> { Lit::Chr(v) }
+}
+
+impl<'a> From<Str<'a>> for Lit<'a> {
+    fn from(v: Str<'a>) -> Lit<'a> { Lit::Str(v) }
+}
+
+impl<'a> From<Label<'a>> for Lit<'a> {
+    fn from(v: Label<'a>) -> Lit<'a> { Lit::Lbl(v) }
+}
+
 use std::fmt;
 use std::fmt::{ Display, Formatter };
 
 impl<'a> Display for Stmt<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Stmt::Label(lbl) => write!(f, "{}:", lbl.as_str()),
+            Stmt::Label(lbl) => write!(f, "{}:", lbl.inner.0),
             Stmt::Inst(inst) => Display::fmt(inst, f),
             Stmt::Lit(lit)   => Display::fmt(lit, f),
         }
@@ -152,7 +206,13 @@ impl<'a> Display for Inst<'a> {
 impl<'a> Display for Arg<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Arg::Lbl(lbl) => write!(f, "<{}>", lbl.as_str()),
+            Arg::Lbl(Spanned { inner: (name, id), .. }) => {
+                write!(f, "<{}", name)?;
+                if *id > 0 {
+                    write!(f, "_{:02x}", id)?;
+                }
+                write!(f, ">")
+            },
             Arg::Lit(lit) => Display::fmt(lit, f),
         }
     }
@@ -161,12 +221,18 @@ impl<'a> Display for Arg<'a> {
 impl<'a> Display for Lit<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Lit::Chr(chr) => write!(f, "'{}'", **chr),
-            Lit::Str(s)   => write!(f, "\"{}\"", s.as_str()),
-            Lit::Num(num) => write!(f, "{}", **num),
-            Lit::Lbl(lbl) => write!(f, "'{}", lbl.as_str()),
+            Lit::Chr(chr) => write!(f, "'{}'", chr.inner),
+            Lit::Str(s)   => write!(f, "\"{}\"", s.inner),
+            Lit::Num(num) => write!(f, "{}", num.inner),
             Lit::Ref(r)   => write!(f, "&{}", r),
             Lit::Deref(d) => write!(f, "*{}", d),
+            Lit::Lbl(Spanned { inner: (name, id), .. }) => {
+                write!(f, "'{}", name)?;
+                if *id > 0 {
+                    write!(f, "_{:02x}", id)?;
+                }
+                Ok(())
+            },
         }
     }
 }

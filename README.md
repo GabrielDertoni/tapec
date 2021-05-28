@@ -218,9 +218,14 @@ string: "Hello, world!\n\0"
 ```
 
 ## TODOs
+
 - Reutilização de constantes: com essa feature, todos os usos de `&0` no código
     serão substituídos por um único label. Isso gera um intcode mais legível e
     compacto. De maneira mais geral, endereços para valores literais não serão
     replicados.
 - Adicionar palavras chave para organização. `.org`
 - Adicionar pseudoinstruções `call` e `ret`.
+
+
+## TODOs (refactor)
+- Change instructions in AST to be enum like. Ex. `Inst::Add(1, 2, 3)`.
