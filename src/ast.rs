@@ -36,6 +36,8 @@ pub enum Op {
 
     Psh,
     Pop,
+    Cal,
+    Ret,
 }
 
 impl Op {
@@ -54,6 +56,8 @@ impl Op {
 
             Op::Psh => 1,
             Op::Pop => 1,
+            Op::Cal => 1,
+            Op::Ret => 0,
         }
     }
 }
@@ -260,6 +264,8 @@ impl Display for Op {
 
             Op::Psh => "psh",
             Op::Pop => "pop",
+            Op::Cal => "cal",
+            Op::Ret => "ret",
         };
 
         write!(f, "{}", name)

@@ -135,6 +135,8 @@ fn parse_inst(pair: Pair<Rule>) -> Result<Inst, Error> {
 
         "psh" => Op::Psh,
         "pop" => Op::Pop,
+        "cal" => Op::Cal,
+        "ret" => Op::Ret,
         _     => return error!("not a valid instruction", ident.as_span()),
     };
 

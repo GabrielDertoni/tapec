@@ -95,8 +95,8 @@ macro_rules! lit {
 }
 
 macro_rules! stmt {
-    ($span:expr => label $name:expr) => {
-        ast::Stmt::Label(ast::mk_lbl(name, $span.clone()))
+    ($span:expr => label $lbl:expr) => {
+        ast::Stmt::Label($lbl)
     };
 
     ($span:expr => lit $($toks:tt)*) => {
@@ -358,7 +358,7 @@ impl<'a> Assembler<'a> {
                         if let Some(pos) = self.labels.get(&lbl) {
                             prev_val = *pos as i32;
                         } else {
-                            return error!("label was not defined", uses[0].span.clone());
+                            return error!(format!("label \"{}\" was not defined", lbl.0), uses[0].span.clone());
                         }
                     }
 
@@ -433,7 +433,11 @@ impl<'a> Assembler<'a> {
             Label(lbl) => {
                 self.add_global_lbl(lbl)?;
                 if self.expand {
-                    println!("{}:", lbl.0);
+                    print!("{}", lbl.0);
+                    if lbl.1 > 0 {
+                        print!("_{:02x}", lbl.1);
+                    }
+                    println!(":");
                 }
                 Ok(0)
             },
@@ -519,7 +523,23 @@ impl<'a> Assembler<'a> {
                     [Add (% [sp]) (% @& (# 1)) (% [sp])]
                     [Cpy (% @* [sp]) arg]
                 })?;
-            }
+            },
+            Cal => {
+                let jmp_back = self.unique_lbl("__ret", inst.span.clone());
+                let procedure_lbl = inst.args[0].clone();
+                count += self.assemble_stmts(stmts! { inst.span.clone() => 
+                    [Psh (% @& jmp_back.clone())]
+                    [Jmp procedure_lbl]
+                    [label jmp_back]
+                })?;
+            },
+            Ret => {
+                let tmp = ("__tmp", 0);
+                count += self.assemble_stmts(stmts! { inst.span.clone() => 
+                    [Pop (% [tmp])]
+                    [Jmp (% [tmp])]
+                })?;
+            },
         }
         Ok(count)
     }
