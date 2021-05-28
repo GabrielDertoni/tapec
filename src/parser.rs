@@ -38,6 +38,7 @@ fn extract_chr(s: &str) -> char {
         "\\t"  => '\t',
         "\\\\" => '\\',
         "\\'"  => '\'',
+        "\\0"  => '\0',
         s      => s.chars().nth(0).unwrap(),
     }
 }
@@ -131,6 +132,9 @@ fn parse_inst(pair: Pair<Rule>) -> Result<Inst, Error> {
         "cpy" => Op::Cpy,
         "put" => Op::Put,
         "ptn" => Op::Ptn,
+
+        "psh" => Op::Psh,
+        "pop" => Op::Pop,
         _     => return error!("not a valid instruction", ident.as_span()),
     };
 

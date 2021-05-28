@@ -32,6 +32,10 @@ pub enum Op {
     Cpy = 7,
     Put = 8,
     Ptn = 9,
+
+
+    Psh,
+    Pop,
 }
 
 impl Op {
@@ -47,6 +51,9 @@ impl Op {
             Op::Put => 1,
             Op::Ptn => 1,
             Op::Hlt => 0,
+
+            Op::Psh => 1,
+            Op::Pop => 1,
         }
     }
 }
@@ -250,6 +257,9 @@ impl Display for Op {
             Op::Cpy => "cpy",
             Op::Put => "put",
             Op::Ptn => "ptn",
+
+            Op::Psh => "psh",
+            Op::Pop => "pop",
         };
 
         write!(f, "{}", name)

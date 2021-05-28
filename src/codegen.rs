@@ -31,16 +31,20 @@ macro_rules! inst_args {
         ast::Arg::Lit(lit!($span => $($toks)*))
     };
 
+    ($span:expr => (% $($toks:tt)*)) => {
+        ast::Arg::Lit(lit!($span => $($toks)*))
+    };
+
     ($span:expr => (@lbl $lbl:expr)) => {
         ast::Arg::Lbl($lbl.into())
     };
 
-    ($span:expr => $lit:expr) => {
-        ast::Arg::Lit($lit.into())
-    };
-
     ($span:expr => <$lbl:ident>) => {
         ast::Arg::Lbl($lbl.into())
+    };
+
+    ($span:expr => $lit:expr) => {
+        $lit.into()
     };
 
     ($span:expr =>) => { };
@@ -53,6 +57,10 @@ macro_rules! inst {
 }
 
 macro_rules! lit {
+    ($span:expr => (# $expr:expr)) => {
+        ast::Lit::Num(ast::Spanned::new($expr, $span.clone()))
+    };
+
     ($span:expr => (@num $expr:expr)) => {
         ast::Lit::Num(ast::Spanned::new($expr, $span.clone()))
     };
@@ -65,12 +73,24 @@ macro_rules! lit {
         ast::Lit::Str(ast::Spanned::new($expr, $span.clone()))
     };
 
+    ($span:expr => (@lbl $expr:expr)) => {
+        ast::Lit::Lbl(ast::Spanned::new($expr, $span.clone()))
+    };
+
+    ($span:expr => [$expr:expr]) => {
+        ast::Lit::Lbl(ast::Spanned::new($expr, $span.clone()))
+    };
+
     ($span:expr => @& $($toks:tt)*) => {
         ast::Lit::Ref(Box::new(lit!($span => $($toks)*)))
     };
 
+    ($span:expr => @* $($toks:tt)*) => {
+        ast::Lit::Deref(Box::new(lit!($span => $($toks)*)))
+    };
+
     ($span:expr => $expr:expr) => {
-        ast::Spanned::new($expr, $span.clone()).into()
+        $expr.into()
     };
 }
 
@@ -385,6 +405,7 @@ impl<'a> Assembler<'a> {
                 },
             }
 
+            // println!("Solving uses of {}, {:?}", auto, uses);
             for lbl_ref in &uses {
                 self.tape[lbl_ref.pos] = prev_val;
             }
@@ -442,9 +463,10 @@ impl<'a> Assembler<'a> {
 
                 let mut desugared_inst = inst.clone();
 
+                // First resolve all of the derefs
                 for (i, arg) in inst.args.iter().enumerate() {
                     let span = arg.span();
-                    let val = match arg {
+                    match arg {
                         Arg::Lit(lit) => {
                             if let Lit::Deref(box deref) = ast::reduce_lit(lit) {
 
@@ -456,14 +478,15 @@ impl<'a> Assembler<'a> {
 
                                 count += gen;
                                 desugared_inst.args[i] = ast::Arg::Lbl(macro_lbl);
-                                EMPTY_DEFAULT
-                            } else {
-                                self.assemble_arg(arg, i)?
                             }
                         },
-                        arg => self.assemble_arg(arg, i)?,
-                    };
-                    arg_vals[i] = val;
+                        _ => (),
+                    }
+                }
+
+                // Now get arg values.
+                for (i, arg) in inst.args.iter().enumerate() {
+                    arg_vals[i] = self.assemble_arg(arg, i)?;
                 }
 
                 if self.expand {
@@ -479,6 +502,24 @@ impl<'a> Assembler<'a> {
                 }
                 count += 1 + inst.args.len();
             },
+
+
+            Psh => {
+                let arg = inst.args[0].clone();
+                let sp = ("sp", 0);
+                count += self.assemble_stmts(stmts! { inst.span.clone() =>
+                    [Cpy arg (% @* [sp])]
+                    [Add (% [sp]) (% @& (# -1)) (% [sp])]
+                })?;
+            },
+            Pop => {
+                let arg = inst.args[0].clone();
+                let sp = ("sp", 0);
+                count += self.assemble_stmts(stmts! { inst.span.clone() => 
+                    [Add (% [sp]) (% @& (# 1)) (% [sp])]
+                    [Cpy (% @* [sp]) arg]
+                })?;
+            }
         }
         Ok(count)
     }
@@ -492,14 +533,10 @@ impl<'a> Assembler<'a> {
             Lit::Str(Spanned { span, .. }) =>
                 error!("cannot dereference this type", span.clone()),
 
-            Lit::Lbl(lbl) =>
-                self.assemble_stmts(stmts! { lbl.span() =>
-                    [Cpy (lbl.clone()) (@lit macro_lbl.inner)]
-                }),
-
+            Lit::Lbl(_) |
             Lit::Deref(_) =>
                 self.assemble_stmts(stmts! { lit.span() =>
-                    [Cpy (lit.clone()) (@lit macro_lbl.inner)]
+                    [Cpy (% lit.clone()) (% [macro_lbl.inner])]
                 }),
 
             Lit::Ref(_) =>
@@ -524,7 +561,7 @@ impl<'a> Assembler<'a> {
                     Lit::Lbl(lbl)   => Ok(self.get_label(lbl, arg_pos) as i32),
                     Lit::Ref(box r) => self.get_value(r, 1, arg_pos).map(|v| v as i32),
                     Lit::Str(s)     => error!("string literal in argument position is not allowed", s.span()),
-                    Lit::Deref(_)   => Ok(0),
+                    Lit::Deref(_)   => Ok(EMPTY_DEFAULT),
                 }
             },
         }
