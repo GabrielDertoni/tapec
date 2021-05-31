@@ -26,7 +26,7 @@ jmp <add1>               - ip = tape[add1]
 beq <add1> <add2>        - ip = tape[add1] ? tape[add2] : ip
 cpy <add1> <dest>        - tape[dest] = tape[add1]
 put <add1>               - putchar(tape[add1])
-pnt <add1>               - printf("%d", tape[add1])
+ptn <add1>               - printf("%d", tape[add1])
 ```
 
 ## Comentários
@@ -219,12 +219,9 @@ string: "Hello, world!\n\0"
 
 ## TODOs
 
-- Reutilização de constantes: com essa feature, todos os usos de `&0` no código
-    serão substituídos por um único label. Isso gera um intcode mais legível e
-    compacto. De maneira mais geral, endereços para valores literais não serão
-    replicados.
 - Adicionar palavras chave para organização. `.org`
-- Adicionar pseudoinstruções `call` e `ret`.
+- Adicionar pseudoinstrução `peek`.
+- Maybe there is an issue with global labels.
 
 
 ## TODOs (refactor)
