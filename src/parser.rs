@@ -162,6 +162,13 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt, Error> {
         Rule::label => Ok(Stmt::Label(parse_label(stmt)?)),
         Rule::inst  => Ok(Stmt::Inst(parse_inst(stmt)?)),
         Rule::lit   => Ok(Stmt::Lit(parse_lit(stmt)?)),
+        Rule::org   => {
+            let num = stmt.into_inner().next().unwrap();
+            match num.as_str().parse() {
+               Ok(n)  => Ok(Stmt::Org(Spanned::new(n, num.as_span()))),
+               Err(e) => error!(e.to_string(), num.as_span()),
+            }
+        },
         _           => unreachable!(),
     }
 }

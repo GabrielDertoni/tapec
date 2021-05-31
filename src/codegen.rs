@@ -14,18 +14,6 @@ macro_rules! error {
     };
 }
 
-// Evaluates to Some(expr) if the pattern matches. Else evaluates to None.
-/*
-macro_rules! mextract {
-    ($to_match:expr, $pat:pat => $expr:expr) => {
-        match $to_match {
-            $pat => Some($expr),
-            _    => None,
-        }
-    };
-}
-*/
-
 macro_rules! inst_args {
     ($span:expr => (@lit $($toks:tt)*)) => {
         ast::Arg::Lit(lit!($span => $($toks)*))
@@ -114,7 +102,6 @@ macro_rules! stmts {
     };
 }
 
-const TAPE_SIZE: usize = 256;
 const EMPTY_DEFAULT: i32 = -1;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -157,6 +144,22 @@ impl<'a> std::fmt::Display for Ident<'a> {
             write!(f, "_{:02x}", self.1)?;
         }
         Ok(())
+    }
+}
+
+#[derive(PartialEq, Eq, Clone)]
+struct LabelDef<'a> {
+    pos: Position,
+    span: Option<Span<'a>>,
+}
+
+impl<'a> LabelDef<'a> {
+    fn new(pos: Position, span: Span<'a>) -> LabelDef<'a> {
+        LabelDef { pos, span: Some(span) }
+    }
+
+    fn auto(pos: Position) -> LabelDef<'a> {
+        LabelDef { pos, span: None }
     }
 }
 
@@ -230,6 +233,23 @@ impl<'a> Auto<'a> {
     fn is_lbl(&self) -> bool { matches!(self, Auto::Lbl(..)) }
     fn is_num(&self) -> bool { matches!(self, Auto::Num(..)) }
     fn is_str(&self) -> bool { matches!(self, Auto::Str(..)) }
+
+    fn is_val_eq(&self, other: &Auto<'a>) -> bool {
+        match self {
+            Auto::Lbl(a, _) => match other {
+                Auto::Lbl(b, _) => a == b,
+                _               => false,
+            },
+            Auto::Num(a, _) => match other {
+                Auto::Num(b, _) => a == b,
+                _               => false,
+            },
+            Auto::Str(a, _) => match other {
+                Auto::Str(b, _) => a == b,
+                _                => false,
+            },
+        }
+    }
 }
 
 impl<'a> std::fmt::Display for Auto<'a> {
@@ -269,19 +289,19 @@ impl<'a> std::fmt::Display for Auto<'a> {
 }
 
 pub struct Assembler<'a> {
-    tape: [i32; TAPE_SIZE],
+    tape: Vec<i32>,
     pos: usize,
     expand: bool,
-    labels: HashMap<Ident<'a>, Position>,
-    locals: HashMap<Ident<'a>, Position>,
+    labels: HashMap<Ident<'a>, LabelDef<'a>>,
+    locals: HashMap<Ident<'a>, LabelDef<'a>>,
     lit_uses: BTreeMap<Auto<'a>, Vec<LabelRef<'a>>>,
     macro_count: usize,
 }
 
 impl<'a> Assembler<'a> {
-    pub fn new(expand: bool) -> Assembler<'a> {
+    pub fn new(tape_size: usize, expand: bool) -> Assembler<'a> {
         Assembler {
-            tape: [0; TAPE_SIZE],
+            tape: vec![0; tape_size],
             pos: 0,
             expand,
             labels: HashMap::new(),
@@ -291,14 +311,16 @@ impl<'a> Assembler<'a> {
         }
     }
 
+    fn goto(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+
     fn get_pos(&self) -> usize {
-        // self.tape.len()
         self.pos
     }
 
     fn push_tape(&mut self, v: i32) {
-        // self.tape.push(v)
-        if self.pos >= TAPE_SIZE {
+        if self.pos >= self.tape.len() {
             panic!("TAPE SIZE EXCEEDED");
         }
         self.tape[self.pos] = v;
@@ -330,10 +352,11 @@ impl<'a> Assembler<'a> {
         Ok(i)
     }
 
-    pub fn assemble(mut self, stmts: &[ast::Stmt<'a>]) -> Result<[i32; TAPE_SIZE]> {
+    pub fn assemble(mut self, stmts: &[ast::Stmt<'a>]) -> Result<Vec<i32>> {
         self.assemble_stmts(stmts)?;
 
         self.solve_locals()?;
+        self.add_auto_lbls()?;
 
         #[derive(PartialEq, Eq)]
         enum SolveState {
@@ -355,8 +378,8 @@ impl<'a> Assembler<'a> {
                 Auto::Lbl(lbl, ref_lvl) => {
                     if prev_lbl_name != lbl.0 {
                         prev_lvl = 0;
-                        if let Some(pos) = self.labels.get(&lbl) {
-                            prev_val = *pos as i32;
+                        if let Some(def) = self.labels.get(&lbl) {
+                            prev_val = def.pos as i32;
                         } else {
                             return error!(format!("label \"{}\" was not defined", lbl.0), uses[0].span.clone());
                         }
@@ -451,6 +474,14 @@ impl<'a> Assembler<'a> {
                 }
                 self.assemble_lit(lit)
             },
+            Org(val)  => {
+                if val.inner < 0 {
+                    self.goto(self.tape.len() + val.inner as usize);
+                } else {
+                    self.goto(val.inner as usize);
+                }
+                Ok(0)
+            },
         }
     }
 
@@ -525,8 +556,10 @@ impl<'a> Assembler<'a> {
                 })?;
             },
             Cal => {
-                let jmp_back = self.unique_lbl("__ret", inst.span.clone());
+                let jmp_back = self.unique_lbl(".__ret", inst.span.clone());
                 let procedure_lbl = inst.args[0].clone();
+
+                // This version puts the return address in the stack.
                 count += self.assemble_stmts(stmts! { inst.span.clone() => 
                     [Psh (% @& jmp_back.clone())]
                     [Jmp procedure_lbl]
@@ -535,6 +568,7 @@ impl<'a> Assembler<'a> {
             },
             Ret => {
                 let tmp = ("__tmp", 0);
+                // This version pops the return address from the stack.
                 count += self.assemble_stmts(stmts! { inst.span.clone() => 
                     [Pop (% [tmp])]
                     [Jmp (% [tmp])]
@@ -662,8 +696,8 @@ impl<'a> Assembler<'a> {
         let labels = if Ident::from(lbl.inner).is_local() { &mut self.locals } else { &mut self.labels };
 
         let ident = Ident::from(lbl.inner);
-        if let Some(pos) = labels.get(&ident).copied() {
-            pos
+        if let Some(def) = labels.get(&ident).cloned() {
+            def.pos
         } else {
             let lbl_ref = LabelRef::new(pos, lbl.span());
             self.lit_uses
@@ -686,7 +720,7 @@ impl<'a> Assembler<'a> {
         match self.locals.entry(Ident::from(lbl.inner)) {
             Occupied(_)   => error!("label defined twice", lbl.span.clone()),
             Vacant(entry) => {
-                entry.insert(to);
+                entry.insert(LabelDef::new(to, lbl.span.clone()));
                 Ok(())
             },
         }
@@ -700,7 +734,7 @@ impl<'a> Assembler<'a> {
         match self.labels.entry(Ident::from(lbl.inner)) {
             Occupied(_)   => error!("label defined twice", lbl.span.clone()),
             Vacant(entry) => {
-                entry.insert(curr_pos);
+                entry.insert(LabelDef::new(curr_pos, lbl.span.clone()));
                 self.solve_locals()
             },
         }
@@ -711,14 +745,13 @@ impl<'a> Assembler<'a> {
 
         // Removes all uses of local labels in values and replaces them with uses of actual
         // numbers.
-        for (lbl, pos) in self.locals.drain() {
-
+        for (lbl, def) in self.locals.drain() {
             let local_lbl_uses: Vec<_> = self.lit_uses
                 .drain_filter(|k, _| (Auto::Lbl(lbl, 0)..=Auto::Lbl(lbl, u32::MAX)).contains(k))
                 .collect();
 
             for (auto, uses) in local_lbl_uses {
-                match self.lit_uses.entry(Auto::Num(pos as i32, auto.unwrap_lbl().1)) {
+                match self.lit_uses.entry(Auto::Num(def.pos as i32, auto.unwrap_lbl().1)) {
                     Occupied(entry) => entry.into_mut().extend(uses),
                     Vacant(entry)   => { entry.insert(uses); },
                 }
@@ -726,6 +759,25 @@ impl<'a> Assembler<'a> {
         }
 
         Ok(())
+    }
+
+    fn add_auto_lbls(&mut self) -> Result<()> {
+        use std::collections::hash_map::Entry::*;
+
+        match self.labels.entry(Ident("__end", 0)) {
+            Occupied(entry) =>
+                error!("cannot define auto label",
+                    entry.get().span
+                        .as_ref()
+                        .unwrap()
+                        .clone()),
+
+            Vacant(entry)   => {
+                let end = self.tape.len();
+                entry.insert(LabelDef::auto(end));
+                Ok(())
+            },
+        }
     }
 
     fn unique_ident<'b: 'a>(&mut self, name: &'b str) -> Ident<'a> {

@@ -72,6 +72,7 @@ pub enum Stmt<'a> {
     Label(Label<'a>),
     Inst(Inst<'a>),
     Lit(Lit<'a>),
+    Org(Num<'a>),
 }
 
 pub type Label<'a> = Spanned<'a, (&'a str, usize)>;
@@ -198,6 +199,7 @@ impl<'a> Display for Stmt<'a> {
             Stmt::Label(lbl) => write!(f, "{}:", lbl.inner.0),
             Stmt::Inst(inst) => Display::fmt(inst, f),
             Stmt::Lit(lit)   => Display::fmt(lit, f),
+            Stmt::Org(num)   => write!(f, ".org {}", num.inner),
         }
     }
 }

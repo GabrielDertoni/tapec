@@ -1,7 +1,7 @@
 
 asm = { SOI ~ stmt* ~ EOI }
 
-stmt = { label | inst | lit }
+stmt = { label | inst | lit | org }
 
 label = ${ lbl_name ~ ":" }
 
@@ -15,6 +15,8 @@ lit = ${ lit_ref | lit_deref | str | chr | lbl | num }
     lit_ref = ${ "&" ~ lit }
     lit_deref = ${ "*" ~ (lit_deref | derefable) }
     derefable = ${ lbl | lit_ref }
+
+org = ${ ".org" ~ WHITESPACE+ ~ num }
 
 lbl = ${ "'" ~ lbl_name }
 lbl_name = @{ "."? ~ ident }
